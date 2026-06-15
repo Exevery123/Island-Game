@@ -2,18 +2,45 @@
 <html>
   <head>
     <title>Game</title>
-    <!-- Moving the font request out of CSS and into a standard HTML link tag -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
   </head>
   <body>
-    <h1>test</h1>
+    <h1>Welcome to {game}</h1>
+<button id="start-btn" class="start-btn"> Start </button>
+
+
+
+
 
     <style>
       h1, h2 {
         font-family: 'Press Start 2P', cursive;
-      }
+        text-align: center;
+        font-weight: 600;
+        margin-bottom: 20px;
+}
+
+.start-btn {
+  font-family: 'Press Start 2P', sans-serif;
+  font-weight: 700;
+  font-size: 1rem;
+  padding: 0.65em 2em;
+  background: #ff9900;
+  color: #000000;
+  border: none;
+  border-radius: 50px;
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+  margin-bottom: 12px;
+}
     </style>
+
+
+
+
+
+
   </body>
 </html>
