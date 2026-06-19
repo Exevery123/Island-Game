@@ -8,12 +8,24 @@
   </head>
   <body>
 
-    <div id="starting-screen" class="view">
+
+
+
+  <div id="starting-screen" class="view">
+
+
     <h1>test</h1>
-<button id="start-btn" class="start-btn"> Start </button>
+    <button id="start-btn" class="start-btn"> Start </button>
+
+
+  </div>
+
+
+
+<div id="username-screen" class="view">
+  <h1>What should we call you?</h1>
+  <input type="text" class="username-input" id="username" placeholder="Enter...." />
 </div>
-
-
 
 
 <style>
@@ -45,7 +57,53 @@ h1 {
   cursor: pointer;
 }
 
+.view {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+#starting-screen {
+  display: flex;
+}
+
+
+input[type="text"] {
+  font-family: 'Press Start 2P', sans-serif;
+  font-weight: 700;
+  font-size: 1rem;
+  width: 300px;
+  padding: 0.6em 1em;
+  border: 100px solid #000000sß;
+  background: rgba(255,255,255,0.5);
+  color: #333;
+  outline: none;
+  text-align: center;
+  transition: box-shadow 0.2s, border-color 0.2s;
+  margin-bottom: 14px;
+}
+
 </style>
+
+
+
+
+
+
+
+<script>
+  const startBtn = document.getElementById('start-btn');
+  const startingScreen = document.getElementById('starting-screen');
+  const usernameScreen = document.getElementById('username-screen');
+
+  startBtn.addEventListener('click', () => {
+    startingScreen.style.display = 'none';
+    usernameScreen.style.display = 'flex';
+  });
+
+</script>
+
 
 
 
