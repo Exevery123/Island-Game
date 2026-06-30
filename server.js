@@ -26,6 +26,16 @@ app.get('/api/player', (req, res) => {
   res.json(readPlayer());
 });
 
+app.post('/api/player', (req, res) => {
+  const { username } = req.body;
+  if (!username || typeof username !== 'string' || !username.trim()) {
+    return res.status(400).json({ error: 'Invalid username' });
+  }
+  const player = { username: username.trim() };
+  savePlayer(player);
+  res.json(player);
+});
+
 app.get('/api/islands', (req, res) => {
   res.json(readIslands());
 });
