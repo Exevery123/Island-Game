@@ -5,7 +5,6 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
   </head>
   <body>
 
@@ -42,7 +41,249 @@
         <span id="hud-username"></span>
       </div>
     </div>
+    <img id="villager-big" src="villager/villager_front.png" alt="villager" />
+    <div id="island-type-btns">
+      <button class="island-btn" data-type="lush">Lush</button>
+      <button class="island-btn" data-type="mountainous">Mountainous</button>
+      <button class="island-btn" data-type="desert">Desert</button>
+      <button class="island-btn" data-type="flooded">Flooded</button>
+    </div>
+    <div id="speech-bubble"></div>
   </div>
+
+<style>
+body {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  margin: 0;
+  background: #111;
+}
+
+h1 {
+  font-family: 'Press Start 2P', cursive;
+  text-align: center;
+  font-weight: 600;
+  margin-bottom: 20px;
+  display: flex;
+  color: #fff;
+}
+
+.start-btn {
+  font-family: 'Press Start 2P', sans-serif;
+  font-weight: 700;
+  font-size: 3rem;
+  padding: 0.65em 2em;
+  background: #ff9900;
+  color: #000000;
+  border: none;
+  cursor: pointer;
+}
+
+.view {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+#starting-screen {
+  display: flex;
+}
+
+input[type="text"] {
+  font-family: 'Press Start 2P', sans-serif;
+  font-weight: 700;
+  font-size: 1rem;
+  width: 300px;
+  padding: 0.6em 1em;
+  background: rgba(255,255,255,0.5);
+  color: #333;
+  border: none;
+  outline: none;
+  text-align: center;
+  transition: box-shadow 0.2s, border-color 0.2s;
+  margin-bottom: 14px;
+}
+
+#tilemap-screen {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+}
+
+#tilemap-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#known-players-hud {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 12px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+#hud-title {
+  font-family: 'Press Start 2P', cursive;
+  font-size: 0.7rem;
+  color: #fff;
+}
+
+#hud-username {
+  font-family: 'Press Start 2P', cursive;
+  font-size: 0.55rem;
+  color: #ccc;
+}
+
+.hud-player {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#villager-big {
+  position: fixed;
+  left: 2vw;
+  bottom: 0;
+  height: 82vh;
+  image-rendering: pixelated;
+  z-index: 5;
+  display: none;
+  pointer-events: none;
+  transform-origin: bottom left;
+  transition: transform 0.9s ease-in, opacity 0.9s ease-in;
+}
+
+#villager-big.villager-shrink {
+  transform: scale(0.06);
+  opacity: 0;
+}
+
+#speech-bubble {
+  position: fixed;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #fff;
+  color: #222;
+  border-radius: 16px;
+  padding: 20px 26px;
+  font-family: 'Press Start 2P', cursive;
+  font-size: 0.75rem;
+  line-height: 1.8;
+  max-width: min(600px, 70vw);
+  z-index: 6;
+  display: none;
+}
+
+#island-type-btns {
+  position: fixed;
+  bottom: 130px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: none;
+  gap: 14px;
+  z-index: 6;
+}
+
+.island-btn {
+  font-family: 'Press Start 2P', cursive;
+  font-size: 0.7rem;
+  padding: 1em 1.2em;
+  border: 3px solid #000;
+  cursor: pointer;
+  color: #000;
+}
+
+.island-btn[data-type="lush"] { background: #3fae4a; }
+.island-btn[data-type="mountainous"] { background: #9aa0a8; }
+.island-btn[data-type="desert"] { background: #e6c463; }
+.island-btn[data-type="flooded"] { background: #4a9bd6; }
+
+#hud-flag {
+  width: 40px;
+  height: 28px;
+  image-rendering: pixelated;
+  border: 1px solid #555;
+  display: none;
+}
+
+#flag-canvas-wrap {
+  position: relative;
+  width: 600px;
+  height: 420px;
+  border: 3px solid #fff;
+}
+
+#flag-canvas, #flag-preview {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+#flag-preview {
+  cursor: crosshair;
+}
+
+#flag-palette {
+  display: grid;
+  grid-template-columns: repeat(8, 36px);
+  gap: 6px;
+  margin-top: 18px;
+}
+
+.swatch {
+  width: 36px;
+  height: 36px;
+  border: 2px solid #444;
+  cursor: pointer;
+  padding: 0;
+}
+
+.swatch.selected {
+  border-color: #ff9900;
+  outline: 2px solid #ff9900;
+}
+
+#flag-tool-btns {
+  display: flex;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.tool-btn {
+  font-family: 'Press Start 2P', sans-serif;
+  font-size: 0.7rem;
+  padding: 0.8em 1.4em;
+  background: #333;
+  color: #fff;
+  border: 2px solid #555;
+  cursor: pointer;
+}
+
+.tool-btn.selected {
+  background: #ff9900;
+  color: #000;
+  border-color: #ff9900;
+}
+
+.tool-btn.done-btn {
+  background: #00aa44;
+  border-color: #00aa44;
+}
+</style>
+
 
 <script src="tilemap.js"></script>
 <script>
@@ -84,7 +325,65 @@
     hideAllScreens();
     tilemapScreen.style.display = 'flex';
     initTilemap();
+    startTutorial();
   }
+
+  // ---- Villager tutorial ----
+  const villagerBig = document.getElementById('villager-big');
+  const bubble = document.getElementById('speech-bubble');
+  const typeBtns = document.getElementById('island-type-btns');
+  let tutStage = -1;
+  let didPan = false, didZoom = false;
+
+  function startTutorial() {
+    if (tutStage !== -1) return;
+    tutStage = 0;
+    villagerBig.style.display = 'block';
+    bubble.style.display = 'block';
+    bubble.textContent = 'Welcome to the island!';
+    // Attach after a beat so the click that closed the flag screen
+    // doesn't count as "any click"
+    setTimeout(() => {
+      window.addEventListener('pointerdown', advancePastWelcome);
+      window.addEventListener('keydown', advancePastWelcome);
+    }, 200);
+  }
+
+  function advancePastWelcome() {
+    if (tutStage !== 0) return;
+    tutStage = 1;
+    bubble.textContent =
+      "Let's start with the controls. Hold middle click to pan, and scroll in and out.";
+    window.removeEventListener('pointerdown', advancePastWelcome);
+    window.removeEventListener('keydown', advancePastWelcome);
+    maybeAskIslandType();
+  }
+
+  window.addEventListener('tilemap-pan', () => { didPan = true; maybeAskIslandType(); });
+  window.addEventListener('tilemap-zoom', () => { didZoom = true; maybeAskIslandType(); });
+
+  function maybeAskIslandType() {
+    if (tutStage !== 1 || !didPan || !didZoom) return;
+    tutStage = 2;
+    bubble.textContent = 'Choose your island type.';
+    typeBtns.style.display = 'flex';
+  }
+
+  typeBtns.querySelectorAll('.island-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (tutStage !== 2) return;
+      tutStage = 3;
+      typeBtns.style.display = 'none';
+      bubble.textContent = 'Here it comes...';
+      startIsland(btn.dataset.type);
+    });
+  });
+
+  window.addEventListener('island-revealed', () => {
+    bubble.style.display = 'none';
+    villagerBig.classList.add('villager-shrink');
+    setTimeout(() => { villagerBig.style.display = 'none'; }, 950);
+  });
 
   async function savePlayer(data) {
     const res = await fetch('/api/player', {
@@ -92,6 +391,7 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
     });
+    if (!res.ok) throw new Error('save failed: HTTP ' + res.status);
     return res.json();
   }
 
@@ -213,7 +513,12 @@
 
   doneBtn.addEventListener('click', async () => {
     const flag = flagCanvas.toDataURL('image/png');
-    const player = await savePlayer({ flag });
+    let player = { username: usernameInput.value.trim(), flag };
+    try {
+      player = await savePlayer({ flag });
+    } catch (err) {
+      console.warn('Could not save flag (continuing anyway):', err);
+    }
     savedFlag = player.flag;
     showTilemap(player);
   });
@@ -226,7 +531,8 @@
     .then(player => {
       if (player.username) usernameInput.value = player.username;
       if (player.flag) savedFlag = player.flag;
-    });
+    })
+    .catch(() => { /* no server (e.g. opened as a file) - start fresh */ });
 
   startBtn.addEventListener('click', () => {
     startingScreen.style.display = 'none';
@@ -237,7 +543,11 @@
   usernameInput.addEventListener('keydown', async (e) => {
     if (e.key === 'Enter' && usernameInput.value.trim()) {
       const username = usernameInput.value.trim();
-      await savePlayer({ username });
+      try {
+        await savePlayer({ username });
+      } catch (err) {
+        console.warn('Could not save username (continuing anyway):', err);
+      }
       showFlagScreen();
     }
   });
