@@ -27,11 +27,22 @@ app.get('/api/player', (req, res) => {
 });
 
 app.post('/api/player', (req, res) => {
-  const { username } = req.body;
-  if (!username || typeof username !== 'string' || !username.trim()) {
-    return res.status(400).json({ error: 'Invalid username' });
+  const { username, flag } = req.body;
+  let player = {};
+  try { player = readPlayer(); } catch (e) {}
+
+  if (username !== undefined) {
+    if (typeof username !== 'string' || !username.trim()) {
+      return res.status(400).json({ error: 'Invalid username' });
+    }
+    player.username = username.trim();
   }
-  const player = { username: username.trim() };
+  if (flag !== undefined) {
+    if (typeof flag !== 'string' || !flag.startsWith('data:image/png;base64,')) {
+      return res.status(400).json({ error: 'Invalid flag' });
+    }
+    player.flag = flag;
+  }
   savePlayer(player);
   res.json(player);
 });
