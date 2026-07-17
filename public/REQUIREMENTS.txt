@@ -1,0 +1,47 @@
+ISLAND GAME - REQUIREMENTS
+==========================
+
+What your computer needs to run this project.
+
+System
+------
+- Node.js 18 or newer (Express 5 requires Node 18+)
+  Check with:  node --version
+  Download:    https://nodejs.org
+- npm (comes bundled with Node.js)
+- Any modern desktop browser (Chrome, Edge, Firefox).
+  The game uses the HTML5 canvas, pointer events, and a mouse:
+  - middle-click drag to pan the map
+  - scroll wheel to zoom
+  so a mouse with a wheel/middle button is recommended.
+- Port 3001 must be free (the server listens on http://localhost:3001)
+
+Dependencies (installed via npm)
+--------------------------------
+- express ^5.2.1  - web server, serves the game and the player API
+- ejs ^5.0.1      - templating (listed in package.json)
+
+Install them with:
+  npm install
+
+Run the game
+------------
+  npm start
+then open http://localhost:3001 in your browser.
+
+Notes
+-----
+- Run the game through the server (npm start, then open
+  http://localhost:3001). Opening public/index.html directly as a file
+  works for drawing and viewing the map, but usernames and flags can
+  only be saved when the server is running.
+- public/index-inline.html is a single-file copy of the game with
+  tilemap.js embedded; it is generated from index.html, so edit
+  index.html and regenerate rather than editing it directly.
+- No build step: the front end is plain HTML/CSS/JS served from public/.
+- The simplex noise used for the island map is implemented in
+  public/tilemap.js - no extra packages needed.
+- Player data (username + flag drawing) is saved to player.json in the
+  project folder, so the folder must be writable.
+- An internet connection is only needed for the "Press Start 2P" Google
+  Font; the game itself runs fully offline (with a fallback font).
