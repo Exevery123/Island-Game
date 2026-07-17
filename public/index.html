@@ -18,11 +18,28 @@
     <input type="text" class="username-input" id="username" placeholder="Enter...." />
   </div>
 
+  <div id="flag-screen" class="view">
+    <h1>Draw your flag!</h1>
+    <div id="flag-canvas-wrap">
+      <canvas id="flag-canvas" width="100" height="70"></canvas>
+      <canvas id="flag-preview" width="100" height="70"></canvas>
+    </div>
+    <div id="flag-palette"></div>
+    <div id="flag-tool-btns">
+      <button id="tool-draw" class="tool-btn selected">Draw</button>
+      <button id="tool-erase" class="tool-btn">Eraser</button>
+      <button id="flag-done" class="tool-btn done-btn">Done</button>
+    </div>
+  </div>
+
   <div id="tilemap-screen" class="view">
     <canvas id="tilemap-canvas"></canvas>
     <div id="known-players-hud">
       <span id="hud-title">Known Players</span>
-      <span id="hud-username"></span>
+      <div class="hud-player">
+        <img id="hud-flag" alt="flag" />
+        <span id="hud-username"></span>
+      </div>
     </div>
   </div>
 
@@ -117,41 +134,272 @@ input[type="text"] {
   font-size: 0.55rem;
   color: #ccc;
 }
+
+.hud-player {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#hud-flag {
+  width: 40px;
+  height: 28px;
+  image-rendering: pixelated;
+  border: 1px solid #555;
+  display: none;
+}
+
+#flag-canvas-wrap {
+  position: relative;
+  width: 600px;
+  height: 420px;
+  border: 3px solid #fff;
+}
+
+#flag-canvas, #flag-preview {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+#flag-preview {
+  cursor: crosshair;
+}
+
+#flag-palette {
+  display: grid;
+  grid-template-columns: repeat(8, 36px);
+  gap: 6px;
+  margin-top: 18px;
+}
+
+.swatch {
+  width: 36px;
+  height: 36px;
+  border: 2px solid #444;
+  cursor: pointer;
+  padding: 0;
+}
+
+.swatch.selected {
+  border-color: #ff9900;
+  outline: 2px solid #ff9900;
+}
+
+#flag-tool-btns {
+  display: flex;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.tool-btn {
+  font-family: 'Press Start 2P', sans-serif;
+  font-size: 0.7rem;
+  padding: 0.8em 1.4em;
+  background: #333;
+  color: #fff;
+  border: 2px solid #555;
+  cursor: pointer;
+}
+
+.tool-btn.selected {
+  background: #ff9900;
+  color: #000;
+  border-color: #ff9900;
+}
+
+.tool-btn.done-btn {
+  background: #00aa44;
+  border-color: #00aa44;
+}
 </style>
 
 
+<script src="tilemap.js"></script>
 <script>
   const startBtn = document.getElementById('start-btn');
   const startingScreen = document.getElementById('starting-screen');
   const usernameScreen = document.getElementById('username-screen');
+  const flagScreen = document.getElementById('flag-screen');
   const tilemapScreen = document.getElementById('tilemap-screen');
   const hudUsername = document.getElementById('hud-username');
+  const hudFlag = document.getElementById('hud-flag');
   const usernameInput = document.getElementById('username');
 
-  function showTilemap(username) {
-    hudUsername.textContent = username;
+  function hideAllScreens() {
     startingScreen.style.display = 'none';
     usernameScreen.style.display = 'none';
-    tilemapScreen.style.display = 'flex';
+    flagScreen.style.display = 'none';
+    tilemapScreen.style.display = 'none';
   }
 
-  async function saveUsername(username) {
+  let savedFlag = null;
+
+  function showFlagScreen() {
+    hideAllScreens();
+    flagScreen.style.display = 'flex';
+    // Start from the saved flag so it can be edited
+    if (savedFlag) {
+      const img = new Image();
+      img.onload = () => flagCtx.drawImage(img, 0, 0, FLAG_W, FLAG_H);
+      img.src = savedFlag;
+    }
+  }
+
+  function showTilemap(player) {
+    hudUsername.textContent = player.username;
+    if (player.flag) {
+      hudFlag.src = player.flag;
+      hudFlag.style.display = 'block';
+    }
+    hideAllScreens();
+    tilemapScreen.style.display = 'flex';
+    initTilemap();
+  }
+
+  async function savePlayer(data) {
     const res = await fetch('/api/player', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username })
+      body: JSON.stringify(data)
     });
     return res.json();
   }
 
-  // On load, check if a username is already saved
+  // ---- Flag editor ----
+  // Flag is 100x70 px. Brush is 10x10 (1/10 of length, 1/7 of height),
+  // eraser is twice as big at 20x20.
+  const FLAG_W = 100, FLAG_H = 70;
+  const DRAW_SIZE = 10, ERASE_SIZE = 20;
+  const COLORS = [
+    '#000000', '#808080', '#c0c0c0', '#ffffff',
+    '#800000', '#ff0000', '#808000', '#ffff00',
+    '#008000', '#00ff00', '#008080', '#00ffff',
+    '#000080', '#0000ff', '#800080', '#ff00ff'
+  ];
+
+  const flagCanvas = document.getElementById('flag-canvas');
+  const flagCtx = flagCanvas.getContext('2d');
+  const previewCanvas = document.getElementById('flag-preview');
+  const previewCtx = previewCanvas.getContext('2d');
+  const palette = document.getElementById('flag-palette');
+  const toolDrawBtn = document.getElementById('tool-draw');
+  const toolEraseBtn = document.getElementById('tool-erase');
+  const doneBtn = document.getElementById('flag-done');
+
+  let currentColor = '#ff0000';
+  let currentTool = 'draw';
+  let isDrawing = false;
+  let lastPos = null;
+
+  // Flag starts as a blank white sheet; the eraser paints back to white.
+  flagCtx.fillStyle = '#ffffff';
+  flagCtx.fillRect(0, 0, FLAG_W, FLAG_H);
+
+  COLORS.forEach(color => {
+    const btn = document.createElement('button');
+    btn.className = 'swatch' + (color === currentColor ? ' selected' : '');
+    btn.style.background = color;
+    btn.addEventListener('click', () => {
+      currentColor = color;
+      palette.querySelectorAll('.swatch').forEach(s => s.classList.remove('selected'));
+      btn.classList.add('selected');
+      setTool('draw');
+    });
+    palette.appendChild(btn);
+  });
+
+  function setTool(tool) {
+    currentTool = tool;
+    toolDrawBtn.classList.toggle('selected', tool === 'draw');
+    toolEraseBtn.classList.toggle('selected', tool === 'erase');
+  }
+  toolDrawBtn.addEventListener('click', () => setTool('draw'));
+  toolEraseBtn.addEventListener('click', () => setTool('erase'));
+
+  function brushSize() {
+    return currentTool === 'erase' ? ERASE_SIZE : DRAW_SIZE;
+  }
+  function brushColor() {
+    return currentTool === 'erase' ? '#ffffff' : currentColor;
+  }
+
+  function toFlagCoords(e) {
+    const rect = previewCanvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) / rect.width * FLAG_W,
+      y: (e.clientY - rect.top) / rect.height * FLAG_H
+    };
+  }
+
+  function stamp(x, y) {
+    const size = brushSize();
+    flagCtx.fillStyle = brushColor();
+    flagCtx.fillRect(Math.round(x - size / 2), Math.round(y - size / 2), size, size);
+  }
+
+  // Stamp along the segment from lastPos so fast strokes stay solid
+  function stampLine(from, to) {
+    const dist = Math.hypot(to.x - from.x, to.y - from.y);
+    const steps = Math.max(1, Math.ceil(dist));
+    for (let i = 0; i <= steps; i++) {
+      stamp(from.x + (to.x - from.x) * i / steps, from.y + (to.y - from.y) * i / steps);
+    }
+  }
+
+  function drawPreview(pos) {
+    previewCtx.clearRect(0, 0, FLAG_W, FLAG_H);
+    if (!pos) return;
+    const size = brushSize();
+    previewCtx.globalAlpha = 0.5;
+    previewCtx.fillStyle = brushColor();
+    previewCtx.fillRect(Math.round(pos.x - size / 2), Math.round(pos.y - size / 2), size, size);
+    previewCtx.globalAlpha = 1;
+  }
+
+  previewCanvas.addEventListener('pointerdown', (e) => {
+    isDrawing = true;
+    previewCanvas.setPointerCapture(e.pointerId);
+    lastPos = toFlagCoords(e);
+    stamp(lastPos.x, lastPos.y);
+  });
+
+  previewCanvas.addEventListener('pointermove', (e) => {
+    const pos = toFlagCoords(e);
+    if (isDrawing) {
+      stampLine(lastPos, pos);
+      lastPos = pos;
+    }
+    drawPreview(pos);
+  });
+
+  previewCanvas.addEventListener('pointerup', () => {
+    isDrawing = false;
+    lastPos = null;
+  });
+
+  previewCanvas.addEventListener('pointerleave', () => {
+    if (!isDrawing) drawPreview(null);
+  });
+
+  doneBtn.addEventListener('click', async () => {
+    const flag = flagCanvas.toDataURL('image/png');
+    const player = await savePlayer({ flag });
+    savedFlag = player.flag;
+    showTilemap(player);
+  });
+
+  // ---- Screen flow ----
+  // Every playthrough goes start -> username -> flag -> map; the saved
+  // name and flag are loaded as editable starting points.
   fetch('/api/player')
     .then(r => r.json())
     .then(player => {
-      if (player.username) {
-        startingScreen.style.display = 'none';
-        showTilemap(player.username);
-      }
+      if (player.username) usernameInput.value = player.username;
+      if (player.flag) savedFlag = player.flag;
     });
 
   startBtn.addEventListener('click', () => {
@@ -163,11 +411,11 @@ input[type="text"] {
   usernameInput.addEventListener('keydown', async (e) => {
     if (e.key === 'Enter' && usernameInput.value.trim()) {
       const username = usernameInput.value.trim();
-      await saveUsername(username);
-      showTilemap(username);
+      await savePlayer({ username });
+      showFlagScreen();
     }
   });
 </script>
-# end
+
   </body>
 </html>
