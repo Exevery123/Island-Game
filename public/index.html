@@ -291,17 +291,20 @@ input[type="text"] {
 #city-sidebar {
   position: fixed;
   top: 0;
-  left: 0;
+  right: 0;
   height: 100vh;
-  width: 240px;
+  width: 300px;
   box-sizing: border-box;
-  background: rgba(15, 20, 30, 0.92);
-  border-right: 3px solid #ffd400;
-  padding: 24px 20px;
+  background: rgb(15, 20, 30);              /* fully opaque */
+  border-style: solid;
+  border-width: 0 0 0 5px;                  /* only the left edge shows */
+  border-color: #ffd400;                    /* replaced by flag gradient in JS */
+  padding: 24px 18px;
   font-family: 'Press Start 2P', cursive;
   color: #fff;
   z-index: 9;
   display: none;
+  flex-direction: column;
 }
 
 #city-sidebar h3 {
@@ -316,6 +319,48 @@ input[type="text"] {
   display: flex;
   justify-content: space-between;
   gap: 10px;
+}
+
+.res-rows {
+  margin-top: 18px;
+  flex: 1;                        /* fill the sidebar's remaining height */
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between; /* spread rows: food on top, uranium at bottom */
+}
+
+/* One resource = two rows of five */
+.res-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.res-line {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 40px;
+}
+
+.res-icon {
+  width: 40px;
+  height: 40px;
+  image-rendering: pixelated;
+  filter: brightness(0);   /* blacked-out (empty) slot */
+  opacity: 0.5;
+}
+
+.res-icon.lit {
+  filter: none;            /* earned slot shows full color */
+  opacity: 1;
+}
+
+.food-divider {
+  align-self: stretch;
+  width: 0;
+  border-left: 2px dashed #ffd400;
+  margin: 0 3px;
 }
 
 #hud-flag {
