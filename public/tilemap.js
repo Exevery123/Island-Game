@@ -632,9 +632,9 @@ function initTilemap() {
   const hudTokens = document.getElementById('hud-tokens');
   const buildPopup = document.getElementById('build-popup');
   const citySidebar = document.getElementById('city-sidebar');
-  function bannerGradient(cols) {
-    if (cols.length >= 3) return `linear-gradient(90deg, ${cols[0]}, ${cols[1]}, ${cols[2]})`;
-    if (cols.length === 2) return `linear-gradient(90deg, ${cols[0]} 0 50%, ${cols[1]} 50% 100%)`;
+  function bannerGradient(cols, dir = '90deg') {
+    if (cols.length >= 3) return `linear-gradient(${dir}, ${cols[0]}, ${cols[1]}, ${cols[2]})`;
+    if (cols.length === 2) return `linear-gradient(${dir}, ${cols[0]} 0 50%, ${cols[1]} 50% 100%)`;
     return cols[0];
   }
   // Double-click the banner to rename the capital (edits the name line only)
@@ -666,17 +666,56 @@ function initTilemap() {
     hudTokens.textContent = `${Math.floor(tokens)} (+${tokensPerSecond()}/s)`;
   }
 
+  // Each resource is a row of 10 slots; filled slots show the colored icon,
+  // the rest are blacked-out. Order: food, wood, iron, gold, uranium.
+  const SIDEBAR_SLOTS = 10;
+  const RESOURCE_ROWS = [
+    { stat: 'food', icon: 'food_icon.png' },
+    { stat: 'wood', icon: 'wood_icon.png' },
+    { stat: 'iron', icon: 'iron_icon.png' },
+    { stat: 'gold', icon: 'gold_icon.png' },
+    { stat: 'uranium', icon: 'uranium.png' }
+  ];
+
   function renderSidebar() {
     if (!citySidebar || !capital) return;
-    citySidebar.innerHTML =
-      `<h3>${capital.name}</h3>` +
+    // Outline = the banner's flag-color gradient, most prominent at the top
+    const g = bannerGradient(flagColors, 'to bottom');
+    if (g.startsWith('linear-gradient')) {
+      citySidebar.style.borderImage = g + ' 1';
+    } else {
+      citySidebar.style.borderImage = 'none';
+      citySidebar.style.borderColor = g;
+    }
+    // City name uses the same flag gradient as text fill
+    const nameGrad = bannerGradient(flagColors, '90deg');
+    const nameStyle = `background:${nameGrad};-webkit-background-clip:text;` +
+      `background-clip:text;-webkit-text-fill-color:transparent;color:transparent;`;
+    let html =
+      `<h3 style="${nameStyle}">${capital.name}</h3>` +
       `<div class="stat-row">Level <b>${capital.level}</b></div>` +
-      `<div class="stat-row">🪙 Tokens <b>${Math.floor(tokens)}</b> (+${tokensPerSecond()}/s)</div>` +
-      `<div class="stat-row">🪵 Wood <b>${capital.wood}</b></div>` +
-      `<div class="stat-row">🌾 Food <b>${capital.food}</b></div>` +
-      `<div class="stat-row">⛓️ Iron <b>${capital.iron}</b></div>` +
-      `<div class="stat-row">🟡 Gold <b>${capital.gold}</b></div>` +
-      `<div class="stat-row">☢️ Uranium <b>${capital.uranium}</b></div>`;
+      `<div class="stat-row">Tokens <b id="sb-tokens">${Math.floor(tokens)}</b>` +
+      ` (+${tokensPerSecond()}/s)</div>` +
+      `<div class="res-rows">`;
+    for (const res of RESOURCE_ROWS) {
+      const amount = capital[res.stat] || 0;
+      // Each resource's 10 slots span two rows of five
+      html += `<div class="res-block">`;
+      for (let line = 0; line < 2; line++) {
+        html += `<div class="res-line">`;
+        for (let j = 0; j < 5; j++) {
+          const i = line * 5 + j;
+          // Food shows a dashed line after `level` slots (city's food upkeep)
+          if (res.stat === 'food' && i === capital.level) html += `<span class="food-divider"></span>`;
+          const lit = i < amount ? ' lit' : '';
+          html += `<img class="res-icon${lit}" src="/images/icons/${res.icon}" alt="" draggable="false" />`;
+        }
+        html += `</div>`;
+      }
+      html += `</div>`;
+    }
+    html += `</div>`;
+    citySidebar.innerHTML = html;
   }
 
   function showBuildPopup(t) {
@@ -1088,7 +1127,7 @@ function initTilemap() {
     walker = { cur: tile, next: null, path: [], t: 0, x: tile.x, y: tile.y,
                facing: 'front', pause: 1400 };
     const name = CITY_NAMES[currentType] || 'Capital';
-    capital = { name, level: 1, wood: 0, food: 0, iron: 0, gold: 0, uranium: 0 };
+    capital = { name, level: 1, wood: 0, food: 2, iron: 0, gold: 0, uranium: 0 };
     tokens = 25;            // starting tokens once the capital is placed
     tokensActive = true;
     if (banner) {
@@ -1193,7 +1232,10 @@ function initTilemap() {
       tokens += tokensPerSecond() * dt / 1000;
       if (Math.floor(tokens) !== before) {
         updateHud();
-        if (citySidebar && citySidebar.style.display === 'block') renderSidebar();
+        if (citySidebar && citySidebar.style.display === 'flex') {
+          const el = document.getElementById('sb-tokens');
+          if (el) el.textContent = Math.floor(tokens);
+        }
         if (selectedTile && buildPopup && buildPopup.style.display === 'block') {
           // re-enable the Build button once the player can afford it
           const btn = buildPopup.querySelector('.bp-build');
@@ -1270,7 +1312,7 @@ function initTilemap() {
         if (buildPopup) buildPopup.style.display = 'none';
         selectedTile = null;
         renderSidebar();
-        if (citySidebar) citySidebar.style.display = 'block';
+        if (citySidebar) citySidebar.style.display = 'flex';
       } else if (t.type !== OCEAN && cityTerritory && cityTerritory.has(t)) {
         // Buildings can only go inside the city borders
         showBuildPopup(t);
