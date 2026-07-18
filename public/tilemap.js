@@ -526,9 +526,12 @@ function initTilemap() {
   let cityBorder = [];      // dashed territory outline segments
   let cityTerritory = null; // tiles inside the border (buildable area)
   let validSet = null;      // tiles where the capital may be placed
+  let freshSet = null;      // subset next to freshwater (green, 2 food)
+  let coastSet = null;      // subset next to open sea (yellow, 1 food)
   let hoverTile = null;     // tile under the cursor while placing
   let flagColors = ['rgb(255,153,0)'];
   let selectedTile = null;  // tile whose build popup is open
+  let currentSeed = null;   // seed the current map was generated from
 
   // Economy: tokens are a global resource, cities hold per-city stats
   let tokens = 0;
@@ -593,6 +596,55 @@ function initTilemap() {
     }
   }
 
+  // Terrain and building sprites (drawn on top of the colored hex)
+  const loadImgs = (dir, files) => {
+    const out = {};
+    for (const [k, f] of Object.entries(files)) {
+      const img = new Image();
+      img.src = dir + f;
+      out[k] = img;
+    }
+    return out;
+  };
+  const terrainImgs = loadImgs('/images/terrain/', {
+    mountain: 'mountain_terrain.png',
+    hill: 'hill_terrain.png',
+    uraniumhill: 'uraniumhill_terrain.png',
+    forest: 'forest_terrain.png',
+    jungle: 'jungle_terrain.png',
+    oasis: 'oasis_terrain.png',
+    shipwreck: 'shipwreck_terrain.png'
+  });
+  const buildingImgs = loadImgs('/images/buildings/', {
+    farm: 'farm_building.png',
+    sawmill: 'sawmill_building.png',
+    junglesawmill: 'jungle_sawmill_buliding.png',
+    oasissawmill: 'oasis_sawmill_buliding.png',
+    mountainmine: 'mountain_mine_building.png',
+    hillmine: 'hill_mine_building.png',
+    uraniumhillmine: 'uraniumhill_mine_building.png'
+  });
+  function terrainImageFor(t) {
+    if (t.type === MOUNTAIN) return terrainImgs.mountain;
+    if (t.type === HILL) return t.silver ? terrainImgs.uraniumhill : terrainImgs.hill;
+    if (t.type === FOREST) return terrainImgs.forest;
+    if (t.type === JUNGLE) return terrainImgs.jungle;
+    if (t.type === OASIS) return terrainImgs.oasis;
+    return null;
+  }
+  function buildingImageFor(t) {
+    if (t.building === 'sawmill') {
+      if (t.type === JUNGLE) return buildingImgs.junglesawmill;
+      if (t.type === OASIS) return buildingImgs.oasissawmill;
+      return buildingImgs.sawmill;
+    }
+    if (t.building === 'mine') {
+      if (t.type === MOUNTAIN) return buildingImgs.mountainmine;
+      return t.silver ? buildingImgs.uraniumhillmine : buildingImgs.hillmine;
+    }
+    return null;
+  }
+
   // The player's flag: drawn as a banner over the capital, and its
   // dominant colors drive the territory border and name banner.
   const flagImg = new Image();
@@ -622,7 +674,11 @@ function initTilemap() {
   }
   window.setCityFlag = function (dataUrl) {
     if (!dataUrl) return;
-    flagImg.onload = () => { flagColors = extractFlagColors(flagImg); };
+    flagImg.onload = () => {
+      flagColors = extractFlagColors(flagImg);
+      // If a capital already exists (e.g. resumed game), refresh its banner
+      if (capital && banner) banner.style.background = bannerGradient(flagColors);
+    };
     flagImg.src = dataUrl;
   };
 
@@ -655,7 +711,7 @@ function initTilemap() {
       cityNameEl.contentEditable = 'false';
       const name = cityNameEl.textContent.trim() || CITY_NAMES[currentType] || 'Capital';
       cityNameEl.textContent = name;
-      if (capital) capital.name = name;
+      if (capital) { capital.name = name; window.dispatchEvent(new Event('game-changed')); }
     });
   }
 
@@ -670,11 +726,11 @@ function initTilemap() {
   // the rest are blacked-out. Order: food, wood, iron, gold, uranium.
   const SIDEBAR_SLOTS = 10;
   const RESOURCE_ROWS = [
-    { stat: 'food', icon: 'food_icon.png' },
-    { stat: 'wood', icon: 'wood_icon.png' },
-    { stat: 'iron', icon: 'iron_icon.png' },
-    { stat: 'gold', icon: 'gold_icon.png' },
-    { stat: 'uranium', icon: 'uranium.png' }
+    { stat: 'food', icon: 'food_icon.png', label: 'Food' },
+    { stat: 'wood', icon: 'wood_icon.png', label: 'Wood' },
+    { stat: 'iron', icon: 'iron_icon.png', label: 'Iron' },
+    { stat: 'gold', icon: 'gold_icon.png', label: 'Gold' },
+    { stat: 'uranium', icon: 'uranium.png', label: 'Uranium' }
   ];
 
   function renderSidebar() {
@@ -699,8 +755,9 @@ function initTilemap() {
       `<div class="res-rows">`;
     for (const res of RESOURCE_ROWS) {
       const amount = capital[res.stat] || 0;
-      // Each resource's 10 slots span two rows of five
+      // Each resource's 10 slots span two rows of five, under a label
       html += `<div class="res-block">`;
+      html += `<div class="res-label">${res.label}</div>`;
       for (let line = 0; line < 2; line++) {
         html += `<div class="res-line">`;
         for (let j = 0; j < 5; j++) {
@@ -746,6 +803,7 @@ function initTilemap() {
     updateHud();
     showBuildPopup(t); // refresh (now shows "already built")
     requestDraw();
+    window.dispatchEvent(new Event('game-changed'));
   }
 
   function dismissPanels() {
@@ -805,52 +863,20 @@ function initTilemap() {
       ctx.stroke();
       if (!revealed || size <= 4) continue;
 
-      if (t.type === MOUNTAIN) {
-        ctx.beginPath();
-        ctx.moveTo(sx - size * 0.45, sy + size * 0.32);
-        ctx.lineTo(sx, sy - size * 0.42);
-        ctx.lineTo(sx + size * 0.45, sy + size * 0.32);
-        ctx.closePath();
-        ctx.fillStyle = '#565b63';
-        ctx.fill();
-        // snow cap
-        ctx.beginPath();
-        ctx.moveTo(sx - size * 0.14, sy - size * 0.19);
-        ctx.lineTo(sx, sy - size * 0.42);
-        ctx.lineTo(sx + size * 0.14, sy - size * 0.19);
-        ctx.closePath();
-        ctx.fillStyle = '#e8ecf2';
-        ctx.fill();
-      } else if (t.type === HILL) {
-        ctx.beginPath();
-        ctx.moveTo(sx - size * 0.45, sy + size * 0.28);
-        ctx.quadraticCurveTo(sx, sy - size * 0.42, sx + size * 0.45, sy + size * 0.28);
-        ctx.closePath();
-        // Silver (uranium) hills get a silver hump, not just a silver hex
-        ctx.fillStyle = t.silver ? '#c2c7d0' : '#8a5424';
-        ctx.fill();
-      } else if (t.type === OASIS) {
-        // little pond in the middle
-        ctx.beginPath();
-        ctx.ellipse(sx, sy + size * 0.08, size * 0.34, size * 0.22, 0, 0, Math.PI * 2);
-        ctx.fillStyle = '#2f86c9';
-        ctx.fill();
+      // Hills (and their mines) sit slightly lower on the tile, like farms
+      const lower = t.type === HILL ? size * 0.3 : 0;
+      // Sawmills and mines replace the terrain image; farms sit on top of it
+      const replacing = t.building === 'sawmill' || t.building === 'mine';
+      if (replacing) {
+        drawTileSprite(buildingImageFor(t), sx, sy + lower, size);
+      } else {
+        const timg = terrainImageFor(t);
+        if (timg) drawTileSprite(timg, sx, sy + lower, size);
+        // Farm sits slightly lower on the tile than terrain sprites
+        if (t.building === 'farm') drawTileSprite(buildingImgs.farm, sx, sy + size * 0.3, size);
       }
 
-      if (t.shipwreck) {
-        // sunken hull with a broken mast
-        ctx.fillStyle = '#6b4226';
-        ctx.beginPath();
-        ctx.moveTo(sx - size * 0.42, sy - size * 0.05);
-        ctx.lineTo(sx + size * 0.42, sy - size * 0.05);
-        ctx.lineTo(sx + size * 0.22, sy + size * 0.28);
-        ctx.lineTo(sx - size * 0.22, sy + size * 0.28);
-        ctx.closePath();
-        ctx.fill();
-        ctx.fillRect(sx - size * 0.04, sy - size * 0.5, size * 0.08, size * 0.45);
-      }
-
-      if (t.building) drawBuilding(sx, sy, size, t.building);
+      if (t.shipwreck) drawTileSprite(terrainImgs.shipwreck, sx, sy, size);
 
       // Highlight the tile whose build popup is open
       if (t === selectedTile) {
@@ -914,17 +940,23 @@ function initTilemap() {
       positionBanner(csx, csy, size2);
     }
 
-    // Ghost village that snaps to the hovered tile while placing
+    // Ghost village that snaps to the hovered tile while placing.
+    // Green = freshwater (2 food), yellow = coast (1 food), red = invalid.
     if (mode === 'placing' && hoverTile) {
       const gsx = hoverTile.x * cam.zoom + cam.x;
       const gsy = hoverTile.y * cam.zoom + cam.y;
-      const ok = validSet && validSet.has(hoverTile);
+      const kind = freshSet && freshSet.has(hoverTile) ? 'fresh'
+        : (coastSet && coastSet.has(hoverTile) ? 'coast' : 'invalid');
+      const fill = kind === 'fresh' ? 'rgba(40, 200, 90, 0.4)'
+        : kind === 'coast' ? 'rgba(230, 200, 40, 0.4)'
+        : 'rgba(220, 50, 50, 0.4)';
+      const hut = kind === 'fresh' ? 'rgba(70, 170, 100, 0.75)'
+        : kind === 'coast' ? 'rgba(200, 170, 50, 0.8)'
+        : 'rgba(200, 70, 70, 0.75)';
       hexPath(gsx, gsy, size2);
-      ctx.fillStyle = ok ? 'rgba(40, 200, 90, 0.4)' : 'rgba(220, 50, 50, 0.4)';
+      ctx.fillStyle = fill;
       ctx.fill();
-      drawVillage(gsx, gsy, size2,
-        ok ? 'rgba(70, 170, 100, 0.75)' : 'rgba(200, 70, 70, 0.75)',
-        'rgba(0, 0, 0, 0.55)');
+      drawVillage(gsx, gsy, size2, hut, 'rgba(0, 0, 0, 0.55)');
     }
 
     // The little villager wandering the island: alternate standing and
@@ -966,7 +998,9 @@ function initTilemap() {
     return pts;
   }
 
-  // Which land tiles may host the capital: land next to a lake or river
+  // Which land tiles may host the capital. Freshwater tiles (next to a lake,
+  // river, or oasis) are best; coastal tiles (next to the open sea) are also
+  // allowed but start the city with less food.
   function computeValidCity() {
     const lakeSet = new Set();
     lakes.forEach(l => l.forEach(i => lakeSet.add(i)));
@@ -992,10 +1026,18 @@ function initTilemap() {
       }
       return false;
     };
+    // Coast = adjacent to open sea (an ocean tile that isn't an inland lake)
+    const bordersCoast = (t) => neighborOffsets(t.r).some(([dc, dr]) => {
+      const n = tileAt(t.c + dc, t.r + dr);
+      return n && n.type === OCEAN && !lakeSet.has(n.r * MAP_COLS + n.c);
+    });
+    freshSet = new Set();
+    coastSet = new Set();
     validSet = new Set();
     for (const t of tiles) {
       if (t.type === OCEAN) continue;
-      if (bordersLake(t) || bordersRiver(t)) validSet.add(t);
+      if (bordersLake(t) || bordersRiver(t)) { freshSet.add(t); validSet.add(t); }
+      else if (bordersCoast(t)) { coastSet.add(t); validSet.add(t); }
     }
   }
 
@@ -1055,45 +1097,15 @@ function initTilemap() {
     hut(0, -size * 0.05, size * 0.5);
   }
 
-  function drawBuilding(sx, sy, size, kind) {
-    if (size <= 3) return;
-    if (kind === 'sawmill') {
-      ctx.fillStyle = '#7a4a1e';
-      ctx.fillRect(sx - size * 0.28, sy - size * 0.05, size * 0.56, size * 0.34);
-      ctx.fillStyle = '#b07a3a'; // roof
-      ctx.beginPath();
-      ctx.moveTo(sx - size * 0.34, sy - size * 0.05);
-      ctx.lineTo(sx, sy - size * 0.34);
-      ctx.lineTo(sx + size * 0.34, sy - size * 0.05);
-      ctx.closePath();
-      ctx.fill();
-      ctx.strokeStyle = '#3a2410'; // saw blade hint
-      ctx.lineWidth = Math.max(0.6, size * 0.05);
-      ctx.beginPath();
-      ctx.moveTo(sx - size * 0.14, sy + size * 0.12);
-      ctx.lineTo(sx + size * 0.14, sy + size * 0.12);
-      ctx.stroke();
-    } else if (kind === 'farm') {
-      ctx.fillStyle = '#c8962a';
-      ctx.fillRect(sx - size * 0.34, sy - size * 0.22, size * 0.68, size * 0.5);
-      ctx.strokeStyle = '#8a6412';
-      ctx.lineWidth = Math.max(0.5, size * 0.05);
-      for (let i = -1; i <= 1; i++) {
-        ctx.beginPath();
-        ctx.moveTo(sx + i * size * 0.2, sy - size * 0.2);
-        ctx.lineTo(sx + i * size * 0.2, sy + size * 0.26);
-        ctx.stroke();
-      }
-    } else if (kind === 'mine') {
-      ctx.fillStyle = '#4a4a52'; // mound
-      ctx.beginPath();
-      ctx.arc(sx, sy + size * 0.1, size * 0.34, Math.PI, 0);
-      ctx.fill();
-      ctx.fillStyle = '#15151a'; // entrance
-      ctx.beginPath();
-      ctx.arc(sx, sy + size * 0.1, size * 0.15, Math.PI, 0);
-      ctx.fill();
-    }
+  // Draw a terrain/building sprite on a tile at 3x the hex size, sitting on
+  // the tile and rising upward (so it pops out like the villager)
+  function drawTileSprite(img, sx, sy, size, scale = 2) {
+    if (!img || !img.complete || !img.naturalWidth) return;
+    const w = scale * size;
+    const h = w * img.naturalHeight / img.naturalWidth;
+    const baseY = sy + size * 0.5; // bottom of the sprite sits at the hex base
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(img, sx - w / 2, baseY - h, w, h);
   }
 
   function drawCityFlag(sx, sy, size) {
@@ -1115,8 +1127,10 @@ function initTilemap() {
 
   function positionBanner(csx, csy, size) {
     if (!banner) return;
+    // Sit just below the capital tile and scale with the zoom like the tiles
     banner.style.left = csx + 'px';
-    banner.style.top = (csy + size * 1.4) + 'px';
+    banner.style.top = (csy + size * 0.275) + 'px';
+    banner.style.transform = `translateX(-50%) scale(${size / 64})`;
   }
 
   function placeCity(tile) {
@@ -1127,7 +1141,9 @@ function initTilemap() {
     walker = { cur: tile, next: null, path: [], t: 0, x: tile.x, y: tile.y,
                facing: 'front', pause: 1400 };
     const name = CITY_NAMES[currentType] || 'Capital';
-    capital = { name, level: 1, wood: 0, food: 2, iron: 0, gold: 0, uranium: 0 };
+    // Freshwater capitals start with 2 food, coastal ones with only 1
+    const startFood = freshSet && freshSet.has(tile) ? 2 : 1;
+    capital = { name, level: 1, wood: 0, food: startFood, iron: 0, gold: 0, uranium: 0 };
     tokens = 25;            // starting tokens once the capital is placed
     tokensActive = true;
     if (banner) {
@@ -1252,10 +1268,64 @@ function initTilemap() {
     if (tiles) return;
     currentType = type;
     window.__islandType = type;
-    ({ tiles, rivers, lakes } = generateMap((Math.random() * 2 ** 31) | 0, type));
+    currentSeed = (Math.random() * 2 ** 31) | 0;
+    ({ tiles, rivers, lakes } = generateMap(currentSeed, type));
     mode = 'revealing';
     revealStart = performance.now();
     revealedCols = 0;
+    requestAnimationFrame(tick);
+  };
+
+  // Serialize the current game so it can be saved. Map is regenerated from
+  // seed + type, so only the seed and the player's changes are stored.
+  window.getGameState = function () {
+    if (!capital || !cityTile) return null;
+    const buildings = [];
+    for (const t of tiles) if (t.building) buildings.push({ c: t.c, r: t.r, building: t.building });
+    return {
+      seed: currentSeed,
+      islandType: currentType,
+      capital: {
+        c: cityTile.c, r: cityTile.r,
+        name: capital.name, level: capital.level,
+        wood: capital.wood, food: capital.food, iron: capital.iron,
+        gold: capital.gold, uranium: capital.uranium
+      },
+      tokens: Math.floor(tokens),
+      buildings
+    };
+  };
+
+  // Load a saved game and jump straight into play (no tutorial/reveal)
+  window.resumeGame = function (state) {
+    if (tiles) return;
+    currentType = state.islandType;
+    window.__islandType = state.islandType;
+    currentSeed = state.seed;
+    ({ tiles, rivers, lakes } = generateMap(currentSeed, currentType));
+    for (const b of state.buildings || []) {
+      const t = tileAt(b.c, b.r);
+      if (t) t.building = b.building;
+    }
+    const ct = tileAt(state.capital.c, state.capital.r);
+    cityTile = ct;
+    buildCityBorder(ct);
+    const s = state.capital;
+    capital = { name: s.name, level: s.level, wood: s.wood, food: s.food,
+                iron: s.iron, gold: s.gold, uranium: s.uranium };
+    tokens = state.tokens || 0;
+    tokensActive = true;
+    mode = 'done';
+    walker = { cur: ct, next: null, path: [], t: 0, x: ct.x, y: ct.y,
+               facing: 'front', pause: 1400 };
+    if (banner) {
+      if (cityNameEl) cityNameEl.textContent = capital.name;
+      if (cityLevelEl) cityLevelEl.textContent = 'Lvl ' + capital.level;
+      banner.style.background = bannerGradient(flagColors);
+      banner.style.display = 'block';
+    }
+    updateHud();
+    fitCamera();
     requestAnimationFrame(tick);
   };
 
