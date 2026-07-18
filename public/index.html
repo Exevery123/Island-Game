@@ -38,7 +38,10 @@
       <span id="hud-title">Known Players</span>
       <div class="hud-player">
         <img id="hud-flag" alt="flag" />
-        <span id="hud-username"></span>
+        <div class="hud-player-text">
+          <span id="hud-username"></span>
+          <span id="hud-tokens"></span>
+        </div>
       </div>
     </div>
     <img id="villager-big" src="villager/villager_front.png" alt="villager" />
@@ -48,6 +51,12 @@
       <button class="island-btn" data-type="desert">Desert</button>
       <button class="island-btn" data-type="flooded">Flooded</button>
     </div>
+    <div id="city-banner">
+      <span id="city-name" title="Double-click to rename"></span>
+      <span id="city-level">Lvl 1</span>
+    </div>
+    <div id="build-popup"></div>
+    <div id="city-sidebar"></div>
     <div id="speech-bubble"></div>
   </div>
 
@@ -208,6 +217,107 @@ input[type="text"] {
 .island-btn[data-type="desert"] { background: #e6c463; }
 .island-btn[data-type="flooded"] { background: #4a9bd6; }
 
+.hud-player-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+#hud-tokens {
+  display: none;
+  font-family: 'Press Start 2P', cursive;
+  font-size: 0.5rem;
+  color: #ffd400;
+  text-align: left;
+}
+
+#city-banner {
+  position: absolute;
+  transform: translateX(-50%);
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 16px;
+  font-family: 'Press Start 2P', cursive;
+  color: #fff;
+  border: 3px solid #000;
+  border-radius: 6px;
+  white-space: nowrap;
+  z-index: 7;
+}
+
+#city-name {
+  font-size: 0.7rem;
+  cursor: text;
+  outline: none;
+  text-shadow: 1px 1px 0 #000, -1px 1px 0 #000, 1px -1px 0 #000, -1px -1px 0 #000;
+}
+
+#city-level {
+  font-size: 0.45rem;
+  text-shadow: 1px 1px 0 #000, -1px 1px 0 #000, 1px -1px 0 #000, -1px -1px 0 #000;
+}
+
+#build-popup {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  display: none;
+  background: rgba(20, 22, 28, 0.95);
+  border: 2px solid #ffd400;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: 'Press Start 2P', cursive;
+  color: #fff;
+  text-align: center;
+  z-index: 8;
+  white-space: nowrap;
+}
+
+#build-popup .bp-title { font-size: 0.6rem; margin-bottom: 6px; }
+#build-popup .bp-yield { font-size: 0.45rem; color: #cfe; margin-bottom: 8px; }
+#build-popup .bp-build {
+  font-family: 'Press Start 2P', cursive;
+  font-size: 0.55rem;
+  padding: 6px 12px;
+  background: #2fa84a;
+  color: #fff;
+  border: 2px solid #000;
+  cursor: pointer;
+}
+#build-popup .bp-build:disabled { background: #666; cursor: not-allowed; }
+
+#city-sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 100vh;
+  width: 240px;
+  box-sizing: border-box;
+  background: rgba(15, 20, 30, 0.92);
+  border-right: 3px solid #ffd400;
+  padding: 24px 20px;
+  font-family: 'Press Start 2P', cursive;
+  color: #fff;
+  z-index: 9;
+  display: none;
+}
+
+#city-sidebar h3 {
+  font-size: 0.85rem;
+  margin: 0 0 18px;
+  color: #ffd400;
+}
+
+#city-sidebar .stat-row {
+  font-size: 0.55rem;
+  line-height: 2;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 #hud-flag {
   width: 40px;
   height: 28px;
@@ -325,6 +435,7 @@ input[type="text"] {
     hideAllScreens();
     tilemapScreen.style.display = 'flex';
     initTilemap();
+    if (window.setCityFlag) window.setCityFlag(player.flag);
     startTutorial();
   }
 
@@ -379,7 +490,17 @@ input[type="text"] {
     });
   });
 
+  // Island finished appearing: the villager asks for a capital before
+  // he shrinks down and hops onto the island.
   window.addEventListener('island-revealed', () => {
+    tutStage = 4;
+    bubble.style.display = 'block';
+    bubble.textContent =
+      'Great! Now place your capital city next to some fresh water, your citizens need a place to drink!';
+  });
+
+  // Capital placed: dismiss the villager tutorial, he now lives on the map
+  window.addEventListener('city-placed', () => {
     bubble.style.display = 'none';
     villagerBig.classList.add('villager-shrink');
     setTimeout(() => { villagerBig.style.display = 'none'; }, 950);
