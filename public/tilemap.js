@@ -84,7 +84,7 @@ const ISLAND_TYPES = {
   mountainous: { land: 0.33, mountain: 0.25, green: 0.12, desert: 0.12, rivers: 3 },
   desert:      { land: 0.25, mountain: 0.15, green: 0.04, desert: 0.50, rivers: 3,
                  extraHills: true, oasis: true },
-  flooded:     { land: 0.25, mountain: 0.08, green: 0.26, desert: 0.14, rivers: 5,
+  flooded:     { land: 0.25, mountain: 0.08, green: 0.26, desert: 0.14, rivers: 7,
                  floodLakes: true, shipwrecks: true }
 };
 
@@ -408,10 +408,42 @@ function generateMap(seed, islandType) {
     }
   }
 
-  // Flooded islands: 10% of lake tiles hold a shipwreck
+  // Exactly 15% of hills are silver: they hold uranium (not useful yet)
+  const hillTiles = landTiles.filter(t => t.type === HILL);
+  let nSilver = Math.round(hillTiles.length * 0.15);
+  const hillPool = hillTiles.slice();
+  while (nSilver-- > 0 && hillPool.length) {
+    hillPool.splice(Math.floor(rand() * hillPool.length), 1)[0].silver = true;
+  }
+
+  // Flooded islands: 10% of lake tiles hold a shipwreck, and non-lake
+  // OCEAN tiles inside the island spawn zone (the central area the
+  // border falloff leaves free, d < 0.7) have a 4% chance of one too
   if (P.shipwrecks) {
-    for (const lake of lakes) {
-      for (const i of lake) if (rand() < 0.10) tiles[i].shipwreck = true;
+    const lakeSet = new Set();
+    lakes.forEach(l => l.forEach(i => lakeSet.add(i)));
+    const zoneOcean = []; // non-lake ocean inside the island spawn zone
+    for (const t of tiles) {
+      if (t.type !== OCEAN || lakeSet.has(t.r * MAP_COLS + t.c)) continue;
+      const nx = (t.c / (MAP_COLS - 1)) * 2 - 1;
+      const ny = (t.r / (MAP_ROWS - 1)) * 2 - 1;
+      if (Math.sqrt(nx * nx + ny * ny) < 0.7) zoneOcean.push(t);
+    }
+    for (const i of lakeSet) {
+      if (rand() < 0.10) tiles[i].shipwreck = true;
+    }
+    for (const t of zoneOcean) {
+      if (rand() < 0.04) t.shipwreck = true;
+    }
+    // Guarantee at least 5 shipwrecks on flooded maps
+    const eligible = [...[...lakeSet].map(i => tiles[i]), ...zoneOcean];
+    let have = eligible.filter(t => t.shipwreck).length;
+    const without = () => eligible.filter(t => !t.shipwreck);
+    while (have < 5) {
+      const pool = without();
+      if (!pool.length) break;
+      pool[Math.floor(rand() * pool.length)].shipwreck = true;
+      have++;
     }
   }
 
@@ -457,7 +489,9 @@ function generateMap(seed, islandType) {
     } else if (t.type === DESERT) {
       t.color = `hsl(45, 60%, ${Math.round(66 + 10 * w)}%)`;
     } else if (t.type === HILL) {
-      t.color = `hsl(27, 52%, ${Math.round(45 + 6 * w)}%)`;
+      t.color = t.silver
+        ? `hsl(210, 8%, ${Math.round(70 + 5 * w)}%)`   // silver = uranium
+        : `hsl(27, 52%, ${Math.round(45 + 6 * w)}%)`;
     } else if (t.type === OASIS) {
       t.color = 'hsl(150, 55%, 45%)';
     } else {
@@ -465,7 +499,7 @@ function generateMap(seed, islandType) {
       t.color = `hsl(220, 6%, ${Math.round(52 + 16 * h)}%)`;
     }
   }
-  return { tiles, rivers };
+  return { tiles, rivers, lakes };
 }
 
 const REVEAL_MS_PER_COL = 250; // island appears one column every 0.25s
@@ -481,11 +515,48 @@ function initTilemap() {
   // starts as blank ocean while the villager runs the tutorial.
   let tiles = null;
   let rivers = [];
-  let mode = 'tutorial'; // -> 'revealing' -> 'done'
+  let lakes = [];
+  let mode = 'tutorial'; // -> 'revealing' -> 'placing' -> 'done'
   let revealedCols = 0;
   let revealStart = 0;
   let walker = null;
   let lastTick = 0;
+  let currentType = 'normal';
+  let cityTile = null;      // where the capital was placed
+  let cityBorder = [];      // dashed territory outline segments
+  let cityTerritory = null; // tiles inside the border (buildable area)
+  let validSet = null;      // tiles where the capital may be placed
+  let hoverTile = null;     // tile under the cursor while placing
+  let flagColors = ['rgb(255,153,0)'];
+  let selectedTile = null;  // tile whose build popup is open
+
+  // Economy: tokens are a global resource, cities hold per-city stats
+  let tokens = 0;
+  let tokensActive = false;
+  let capital = null;       // { name, level, wood, food, iron, gold, uranium }
+
+  const CITY_NAMES = {
+    lush: 'Brasilia',       // capital of Brazil
+    mountainous: 'Bern',    // capital of Switzerland
+    desert: 'Riyadh',       // capital of Saudi Arabia
+    flooded: 'London',      // capital of Great Britain
+    normal: 'Capital'
+  };
+
+  const BUILD_COST = 10;
+  // What each tile type can build, and the stat it yields to the city
+  function buildOptionFor(t) {
+    if (t.building) return null; // one building per tile
+    if (t.type === FOREST || t.type === OASIS) return { key: 'sawmill', label: 'Sawmill', stat: 'wood', amount: 1 };
+    if (t.type === JUNGLE) return { key: 'sawmill', label: 'Sawmill', stat: 'wood', amount: 2 };
+    if (t.type === PLAINS) return { key: 'farm', label: 'Farm', stat: 'food', amount: 1 };
+    if (t.type === MOUNTAIN) return { key: 'mine', label: 'Mine', stat: 'iron', amount: 1 };
+    if (t.type === HILL) return t.silver
+      ? { key: 'mine', label: 'Uranium Mine', stat: 'uranium', amount: 1 }
+      : { key: 'mine', label: 'Mine', stat: 'gold', amount: 1 };
+    return null;
+  }
+  const tokensPerSecond = () => (capital ? capital.level : 0); // = total city levels
 
   const OCEAN_BLANK = 'hsl(207, 65%, 26%)';
   const placeholder = [];
@@ -499,14 +570,150 @@ function initTilemap() {
     }
   }
 
-  const villagerImgs = {
-    front: new Image(),
-    left: new Image(),
-    right: new Image()
+  const spriteFiles = {
+    stand: {
+      front: 'villager_front.png',
+      back: 'villager_back.png',
+      left: 'villager_facing_left.png',
+      right: 'villager_facing_right.png'
+    },
+    walk: {
+      front: 'villager_walking_front.png',
+      back: 'villager_walking_back.png',
+      left: 'villager_walking_left.png',
+      right: 'villager_walking_right.png'
+    }
   };
-  villagerImgs.front.src = 'villager/villager_front.png';
-  villagerImgs.left.src = 'villager/villager_facing_left.png';
-  villagerImgs.right.src = 'villager/villager_facing_right.png';
+  const villagerImgs = { stand: {}, walk: {} };
+  for (const pose of ['stand', 'walk']) {
+    for (const dir of ['front', 'back', 'left', 'right']) {
+      const img = new Image();
+      img.src = 'villager/' + spriteFiles[pose][dir];
+      villagerImgs[pose][dir] = img;
+    }
+  }
+
+  // The player's flag: drawn as a banner over the capital, and its
+  // dominant colors drive the territory border and name banner.
+  const flagImg = new Image();
+  function extractFlagColors(img) {
+    try {
+      const oc = document.createElement('canvas');
+      oc.width = img.naturalWidth || 100;
+      oc.height = img.naturalHeight || 70;
+      const octx = oc.getContext('2d');
+      octx.drawImage(img, 0, 0, oc.width, oc.height);
+      const data = octx.getImageData(0, 0, oc.width, oc.height).data;
+      const counts = new Map();
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] < 128) continue; // skip transparent
+        const r = Math.min(255, Math.round(data[i] / 32) * 32);
+        const g = Math.min(255, Math.round(data[i + 1] / 32) * 32);
+        const b = Math.min(255, Math.round(data[i + 2] / 32) * 32);
+        const key = r + ',' + g + ',' + b;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+      const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+      const cols = sorted.slice(0, 3).map(([k]) => 'rgb(' + k + ')');
+      return cols.length ? cols : ['rgb(255,153,0)'];
+    } catch (e) {
+      return ['rgb(255,153,0)'];
+    }
+  }
+  window.setCityFlag = function (dataUrl) {
+    if (!dataUrl) return;
+    flagImg.onload = () => { flagColors = extractFlagColors(flagImg); };
+    flagImg.src = dataUrl;
+  };
+
+  const banner = document.getElementById('city-banner');
+  const cityNameEl = document.getElementById('city-name');
+  const cityLevelEl = document.getElementById('city-level');
+  const hudTokens = document.getElementById('hud-tokens');
+  const buildPopup = document.getElementById('build-popup');
+  const citySidebar = document.getElementById('city-sidebar');
+  function bannerGradient(cols) {
+    if (cols.length >= 3) return `linear-gradient(90deg, ${cols[0]}, ${cols[1]}, ${cols[2]})`;
+    if (cols.length === 2) return `linear-gradient(90deg, ${cols[0]} 0 50%, ${cols[1]} 50% 100%)`;
+    return cols[0];
+  }
+  // Double-click the banner to rename the capital (edits the name line only)
+  if (cityNameEl) {
+    cityNameEl.addEventListener('dblclick', () => {
+      cityNameEl.contentEditable = 'true';
+      cityNameEl.focus();
+      const range = document.createRange();
+      range.selectNodeContents(cityNameEl);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    });
+    cityNameEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); cityNameEl.blur(); }
+    });
+    cityNameEl.addEventListener('blur', () => {
+      cityNameEl.contentEditable = 'false';
+      const name = cityNameEl.textContent.trim() || CITY_NAMES[currentType] || 'Capital';
+      cityNameEl.textContent = name;
+      if (capital) capital.name = name;
+    });
+  }
+
+  function updateHud() {
+    if (!hudTokens) return;
+    if (!tokensActive) { hudTokens.style.display = 'none'; return; }
+    hudTokens.style.display = 'block';
+    hudTokens.textContent = `${Math.floor(tokens)} (+${tokensPerSecond()}/s)`;
+  }
+
+  function renderSidebar() {
+    if (!citySidebar || !capital) return;
+    citySidebar.innerHTML =
+      `<h3>${capital.name}</h3>` +
+      `<div class="stat-row">Level <b>${capital.level}</b></div>` +
+      `<div class="stat-row">🪙 Tokens <b>${Math.floor(tokens)}</b> (+${tokensPerSecond()}/s)</div>` +
+      `<div class="stat-row">🪵 Wood <b>${capital.wood}</b></div>` +
+      `<div class="stat-row">🌾 Food <b>${capital.food}</b></div>` +
+      `<div class="stat-row">⛓️ Iron <b>${capital.iron}</b></div>` +
+      `<div class="stat-row">🟡 Gold <b>${capital.gold}</b></div>` +
+      `<div class="stat-row">☢️ Uranium <b>${capital.uranium}</b></div>`;
+  }
+
+  function showBuildPopup(t) {
+    selectedTile = t;
+    if (citySidebar) citySidebar.style.display = 'none';
+    if (!buildPopup) return;
+    const opt = buildOptionFor(t);
+    if (!opt) {
+      const why = t.building ? `Already has a ${t.building}.` : 'Nothing can be built here.';
+      buildPopup.innerHTML = `<div class="bp-title">${why}</div>`;
+    } else {
+      const afford = tokens >= BUILD_COST;
+      buildPopup.innerHTML =
+        `<div class="bp-title">${opt.label}</div>` +
+        `<div class="bp-yield">+${opt.amount} ${opt.stat} · ${BUILD_COST} tokens</div>` +
+        `<button class="bp-build"${afford ? '' : ' disabled'}>Build</button>`;
+      const btn = buildPopup.querySelector('.bp-build');
+      if (btn) btn.addEventListener('click', () => build(t, opt));
+    }
+    buildPopup.style.display = 'block';
+  }
+
+  function build(t, opt) {
+    if (tokens < BUILD_COST || t.building) return;
+    tokens -= BUILD_COST;
+    t.building = opt.key;
+    capital[opt.stat] += opt.amount;
+    updateHud();
+    showBuildPopup(t); // refresh (now shows "already built")
+    requestDraw();
+  }
+
+  function dismissPanels() {
+    selectedTile = null;
+    if (buildPopup) buildPopup.style.display = 'none';
+    if (citySidebar) citySidebar.style.display = 'none';
+  }
 
   const mapW = HEX_W * (MAP_COLS + 0.5);
   const mapH = HEX_H * (MAP_ROWS - 1) + 2 * HEX_SIZE;
@@ -545,12 +752,17 @@ function initTilemap() {
       if (sx < -margin || sx > canvas.width + margin ||
           sy < -margin || sy > canvas.height + margin) continue;
 
-      const revealed = mode === 'done' ||
+      // Once placed or being placed the whole island stays visible; during
+      // the reveal only the columns that have swept in are shown.
+      const revealed = mode === 'done' || mode === 'placing' ||
         (mode === 'revealing' && t.c < revealedCols);
 
       hexPath(sx, sy, size);
       ctx.fillStyle = revealed ? t.color : OCEAN_BLANK;
       ctx.fill();
+      // Reset the outline every tile so no feature/building stroke leaks in
+      ctx.lineWidth = Math.max(0.4, size * 0.06);
+      ctx.strokeStyle = 'rgba(0, 20, 40, 0.25)';
       ctx.stroke();
       if (!revealed || size <= 4) continue;
 
@@ -575,7 +787,8 @@ function initTilemap() {
         ctx.moveTo(sx - size * 0.45, sy + size * 0.28);
         ctx.quadraticCurveTo(sx, sy - size * 0.42, sx + size * 0.45, sy + size * 0.28);
         ctx.closePath();
-        ctx.fillStyle = '#8a5424';
+        // Silver (uranium) hills get a silver hump, not just a silver hex
+        ctx.fillStyle = t.silver ? '#c2c7d0' : '#8a5424';
         ctx.fill();
       } else if (t.type === OASIS) {
         // little pond in the middle
@@ -596,6 +809,18 @@ function initTilemap() {
         ctx.closePath();
         ctx.fill();
         ctx.fillRect(sx - size * 0.04, sy - size * 0.5, size * 0.08, size * 0.45);
+      }
+
+      if (t.building) drawBuilding(sx, sy, size, t.building);
+
+      // Highlight the tile whose build popup is open
+      if (t === selectedTile) {
+        hexPath(sx, sy, size);
+        ctx.lineWidth = Math.max(1.2, size * 0.12);
+        ctx.strokeStyle = '#ffe066';
+        ctx.stroke();
+        ctx.lineWidth = Math.max(0.4, size * 0.06);
+        ctx.strokeStyle = 'rgba(0, 20, 40, 0.25)';
       }
     }
 
@@ -625,9 +850,50 @@ function initTilemap() {
       ctx.restore();
     }
 
-    // The little villager wandering the island
+    const size2 = HEX_SIZE * cam.zoom;
+
+    // Placed capital: dashed territory border, village huts, flag banner
+    if (cityTile) {
+      if (cityBorder.length) {
+        ctx.save();
+        ctx.setLineDash([size2 * 0.4, size2 * 0.3]);
+        ctx.lineWidth = Math.max(1.5, size2 * 0.14);
+        ctx.strokeStyle = flagColors[0];
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        for (const [p1, p2] of cityBorder) {
+          ctx.moveTo(p1.x * cam.zoom + cam.x, p1.y * cam.zoom + cam.y);
+          ctx.lineTo(p2.x * cam.zoom + cam.x, p2.y * cam.zoom + cam.y);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+      const csx = cityTile.x * cam.zoom + cam.x;
+      const csy = cityTile.y * cam.zoom + cam.y;
+      drawVillage(csx, csy, size2, '#d0a066', '#7a4a1e');
+      drawCityFlag(csx, csy, size2);
+      positionBanner(csx, csy, size2);
+    }
+
+    // Ghost village that snaps to the hovered tile while placing
+    if (mode === 'placing' && hoverTile) {
+      const gsx = hoverTile.x * cam.zoom + cam.x;
+      const gsy = hoverTile.y * cam.zoom + cam.y;
+      const ok = validSet && validSet.has(hoverTile);
+      hexPath(gsx, gsy, size2);
+      ctx.fillStyle = ok ? 'rgba(40, 200, 90, 0.4)' : 'rgba(220, 50, 50, 0.4)';
+      ctx.fill();
+      drawVillage(gsx, gsy, size2,
+        ok ? 'rgba(70, 170, 100, 0.75)' : 'rgba(200, 70, 70, 0.75)',
+        'rgba(0, 0, 0, 0.55)');
+    }
+
+    // The little villager wandering the island: alternate standing and
+    // walking frames while he moves for a 2-frame walk cycle
     if (mode === 'done' && walker) {
-      const img = villagerImgs[walker.facing];
+      const moving = walker.next && walker.pause <= 0;
+      const pose = moving && Math.floor(performance.now() / 160) % 2 ? 'walk' : 'stand';
+      const img = villagerImgs[pose][walker.facing];
       if (img.complete && img.naturalWidth) {
         const h = 2.1 * size; // about one tile tall
         const w = h * img.naturalWidth / img.naturalHeight;
@@ -637,12 +903,204 @@ function initTilemap() {
         ctx.drawImage(img, px - w / 2, py - h * 0.8, w, h);
       }
     }
+
+    // Keep the build popup pinned above its tile as the camera moves
+    if (selectedTile && buildPopup && buildPopup.style.display === 'block') {
+      buildPopup.style.left = (selectedTile.x * cam.zoom + cam.x) + 'px';
+      buildPopup.style.top = (selectedTile.y * cam.zoom + cam.y - size2 - 10) + 'px';
+    }
   }
 
   // ---- Villager random walk (land only; rivers are on edges, so he
   // simply walks across them) ----
   const tileAt = (c, r) =>
     (c < 0 || c >= MAP_COLS || r < 0 || r >= MAP_ROWS) ? null : tiles[r * MAP_COLS + c];
+
+  // ---- Capital city placement ----
+  const cornerKeyAt = (px, py) => Math.round(px * 10) + ',' + Math.round(py * 10);
+  function tileCornerPoints(t) {
+    const pts = [];
+    for (let k = 0; k < 6; k++) {
+      const ang = Math.PI / 180 * (60 * k - 30);
+      pts.push({ x: t.x + HEX_SIZE * Math.cos(ang), y: t.y + HEX_SIZE * Math.sin(ang) });
+    }
+    return pts;
+  }
+
+  // Which land tiles may host the capital: land next to a lake or river
+  function computeValidCity() {
+    const lakeSet = new Set();
+    lakes.forEach(l => l.forEach(i => lakeSet.add(i)));
+    const riverEdgeKeys = new Set();
+    for (const path of rivers) {
+      for (let i = 0; i + 1 < path.length; i++) {
+        const a = cornerKeyAt(path[i].x, path[i].y);
+        const b = cornerKeyAt(path[i + 1].x, path[i + 1].y);
+        riverEdgeKeys.add(a < b ? a + '|' + b : b + '|' + a);
+      }
+    }
+    // Freshwater = an adjacent lake tile or an adjacent oasis (oases count
+    // as freshwater for capital placement)
+    const bordersLake = (t) => neighborOffsets(t.r).some(([dc, dr]) => {
+      const n = tileAt(t.c + dc, t.r + dr);
+      return n && (lakeSet.has(n.r * MAP_COLS + n.c) || n.type === OASIS);
+    });
+    const bordersRiver = (t) => {
+      const cs = tileCornerPoints(t).map(p => cornerKeyAt(p.x, p.y));
+      for (let k = 0; k < 6; k++) {
+        const a = cs[k], b = cs[(k + 1) % 6];
+        if (riverEdgeKeys.has(a < b ? a + '|' + b : b + '|' + a)) return true;
+      }
+      return false;
+    };
+    validSet = new Set();
+    for (const t of tiles) {
+      if (t.type === OCEAN) continue;
+      if (bordersLake(t) || bordersRiver(t)) validSet.add(t);
+    }
+  }
+
+  // Dashed outline one tile out from the city = boundary of {city + its
+  // neighbors}. An edge shared by two territory tiles is interior; an
+  // edge touched by only one is on the boundary.
+  function buildCityBorder(city) {
+    const territory = [city];
+    for (const [dc, dr] of neighborOffsets(city.r)) {
+      const n = tileAt(city.c + dc, city.r + dr);
+      if (n) territory.push(n);
+    }
+    cityTerritory = new Set(territory); // buildings are limited to these tiles
+    const edges = new Map();
+    for (const t of territory) {
+      const pts = tileCornerPoints(t);
+      for (let k = 0; k < 6; k++) {
+        const p1 = pts[k], p2 = pts[(k + 1) % 6];
+        const ka = cornerKeyAt(p1.x, p1.y), kb = cornerKeyAt(p2.x, p2.y);
+        const key = ka < kb ? ka + '|' + kb : kb + '|' + ka;
+        const e = edges.get(key);
+        if (e) e.count++; else edges.set(key, { count: 1, p1, p2 });
+      }
+    }
+    cityBorder = [...edges.values()].filter(e => e.count === 1).map(e => [e.p1, e.p2]);
+  }
+
+  function screenToTile(sx, sy) {
+    const wx = (sx - cam.x) / cam.zoom;
+    const wy = (sy - cam.y) / cam.zoom;
+    let best = null, bestD = Infinity;
+    for (const t of tiles) {
+      const d = (t.x - wx) ** 2 + (t.y - wy) ** 2;
+      if (d < bestD) { bestD = d; best = t; }
+    }
+    return best;
+  }
+
+  function drawVillage(sx, sy, size, fill, stroke) {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = Math.max(0.6, size * 0.05);
+    const hut = (ox, oy, w) => {
+      const h = w * 0.9;
+      ctx.fillStyle = fill;
+      ctx.fillRect(sx + ox - w / 2, sy + oy - h / 2, w, h);
+      ctx.strokeRect(sx + ox - w / 2, sy + oy - h / 2, w, h);
+      ctx.beginPath(); // roof
+      ctx.moveTo(sx + ox - w * 0.62, sy + oy - h / 2);
+      ctx.lineTo(sx + ox, sy + oy - h * 1.15);
+      ctx.lineTo(sx + ox + w * 0.62, sy + oy - h / 2);
+      ctx.closePath();
+      ctx.fillStyle = stroke;
+      ctx.fill();
+    };
+    hut(-size * 0.28, size * 0.18, size * 0.42);
+    hut(size * 0.30, size * 0.20, size * 0.38);
+    hut(0, -size * 0.05, size * 0.5);
+  }
+
+  function drawBuilding(sx, sy, size, kind) {
+    if (size <= 3) return;
+    if (kind === 'sawmill') {
+      ctx.fillStyle = '#7a4a1e';
+      ctx.fillRect(sx - size * 0.28, sy - size * 0.05, size * 0.56, size * 0.34);
+      ctx.fillStyle = '#b07a3a'; // roof
+      ctx.beginPath();
+      ctx.moveTo(sx - size * 0.34, sy - size * 0.05);
+      ctx.lineTo(sx, sy - size * 0.34);
+      ctx.lineTo(sx + size * 0.34, sy - size * 0.05);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#3a2410'; // saw blade hint
+      ctx.lineWidth = Math.max(0.6, size * 0.05);
+      ctx.beginPath();
+      ctx.moveTo(sx - size * 0.14, sy + size * 0.12);
+      ctx.lineTo(sx + size * 0.14, sy + size * 0.12);
+      ctx.stroke();
+    } else if (kind === 'farm') {
+      ctx.fillStyle = '#c8962a';
+      ctx.fillRect(sx - size * 0.34, sy - size * 0.22, size * 0.68, size * 0.5);
+      ctx.strokeStyle = '#8a6412';
+      ctx.lineWidth = Math.max(0.5, size * 0.05);
+      for (let i = -1; i <= 1; i++) {
+        ctx.beginPath();
+        ctx.moveTo(sx + i * size * 0.2, sy - size * 0.2);
+        ctx.lineTo(sx + i * size * 0.2, sy + size * 0.26);
+        ctx.stroke();
+      }
+    } else if (kind === 'mine') {
+      ctx.fillStyle = '#4a4a52'; // mound
+      ctx.beginPath();
+      ctx.arc(sx, sy + size * 0.1, size * 0.34, Math.PI, 0);
+      ctx.fill();
+      ctx.fillStyle = '#15151a'; // entrance
+      ctx.beginPath();
+      ctx.arc(sx, sy + size * 0.1, size * 0.15, Math.PI, 0);
+      ctx.fill();
+    }
+  }
+
+  function drawCityFlag(sx, sy, size) {
+    if (!flagImg.complete || !flagImg.naturalWidth) return;
+    // Flag drawn at half its former size
+    const fw = size * 0.75;
+    const fh = fw * flagImg.naturalHeight / flagImg.naturalWidth;
+    const poleX = sx + size * 0.55;
+    const poleTop = sy - size * 1.4;
+    ctx.strokeStyle = '#5a3a1a';
+    ctx.lineWidth = Math.max(1, size * 0.08);
+    ctx.beginPath();
+    ctx.moveTo(poleX, sy);
+    ctx.lineTo(poleX, poleTop);
+    ctx.stroke();
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(flagImg, poleX, poleTop, fw, fh);
+  }
+
+  function positionBanner(csx, csy, size) {
+    if (!banner) return;
+    banner.style.left = csx + 'px';
+    banner.style.top = (csy + size * 1.4) + 'px';
+  }
+
+  function placeCity(tile) {
+    cityTile = tile;
+    currentType = window.__islandType || currentType;
+    buildCityBorder(tile);
+    mode = 'done';
+    walker = { cur: tile, next: null, path: [], t: 0, x: tile.x, y: tile.y,
+               facing: 'front', pause: 1400 };
+    const name = CITY_NAMES[currentType] || 'Capital';
+    capital = { name, level: 1, wood: 0, food: 0, iron: 0, gold: 0, uranium: 0 };
+    tokens = 25;            // starting tokens once the capital is placed
+    tokensActive = true;
+    if (banner) {
+      if (cityNameEl) cityNameEl.textContent = name;
+      if (cityLevelEl) cityLevelEl.textContent = 'Lvl ' + capital.level;
+      banner.style.background = bannerGradient(flagColors);
+      banner.style.display = 'block';
+    }
+    updateHud();
+    window.dispatchEvent(new Event('city-placed'));
+    requestDraw();
+  }
 
   function startWalker() {
     const land = tiles.filter(t => t.type !== OCEAN);
@@ -651,17 +1109,56 @@ function initTilemap() {
     walker = { cur: start, next: null, t: 0, x: start.x, y: start.y, facing: 'front', pause: 800 };
   }
 
+  // BFS over land tiles: shortest tile path from one tile to another,
+  // or null if the destination is on a separate landmass
+  function findPath(from, to) {
+    if (from === to) return [from];
+    const prev = new Map();
+    const seen = new Set([from]);
+    const queue = [from];
+    while (queue.length) {
+      const cur = queue.shift();
+      for (const [dc, dr] of neighborOffsets(cur.r)) {
+        const n = tileAt(cur.c + dc, cur.r + dr);
+        if (n === null || n.type === OCEAN || seen.has(n)) continue;
+        seen.add(n);
+        prev.set(n, cur);
+        if (n === to) {
+          const path = [n];
+          let p = n;
+          while (prev.has(p)) { p = prev.get(p); path.push(p); }
+          return path.reverse();
+        }
+        queue.push(n);
+      }
+    }
+    return null;
+  }
+
   function updateWalker(dt) {
     if (walker.pause > 0) { walker.pause -= dt; return; }
     if (!walker.next) {
-      const options = neighborOffsets(walker.cur.r)
-        .map(([dc, dr]) => tileAt(walker.cur.c + dc, walker.cur.r + dr))
-        .filter(t => t !== null && t.type !== OCEAN);
-      if (!options.length) { walker.pause = 1000; return; }
-      walker.next = options[Math.floor(Math.random() * options.length)];
+      if (!walker.path || !walker.path.length) {
+        // Pick a random reachable destination somewhere on the island
+        const land = tiles.filter(t => t.type !== OCEAN && t !== walker.cur);
+        let path = null;
+        for (let tries = 0; tries < 10 && !path && land.length; tries++) {
+          const dest = land[Math.floor(Math.random() * land.length)];
+          path = findPath(walker.cur, dest);
+          if (path && path.length < 2) path = null;
+        }
+        if (!path) { walker.pause = 1000; return; }
+        walker.path = path.slice(1); // drop the tile he is standing on
+      }
+      walker.next = walker.path.shift();
       walker.t = 0;
+      // Horizontal hex steps face left/right; diagonal steps face
+      // front (downward) or back (upward)
       const dx = walker.next.x - walker.cur.x;
-      walker.facing = dx > 1 ? 'right' : dx < -1 ? 'left' : 'front';
+      const dy = walker.next.y - walker.cur.y;
+      walker.facing = Math.abs(dy) > 5
+        ? (dy > 0 ? 'front' : 'back')
+        : (dx > 0 ? 'right' : 'left');
     }
     walker.t += dt / 700; // ms per step
     if (walker.t >= 1) {
@@ -669,8 +1166,8 @@ function initTilemap() {
       walker.next = null;
       walker.x = walker.cur.x;
       walker.y = walker.cur.y;
-      if (Math.random() < 0.25) { // sometimes stop and look around
-        walker.pause = 400 + Math.random() * 1200;
+      if (!walker.path.length) { // destination reached: look around
+        walker.pause = 600 + Math.random() * 1500;
         walker.facing = 'front';
       }
     } else {
@@ -685,12 +1182,25 @@ function initTilemap() {
     if (mode === 'revealing') {
       revealedCols = (now - revealStart) / REVEAL_MS_PER_COL;
       if (revealedCols >= MAP_COLS + 1) {
-        mode = 'done';
-        startWalker();
+        mode = 'placing';
+        computeValidCity();
         window.dispatchEvent(new Event('island-revealed'));
       }
     }
     if (mode === 'done' && walker) updateWalker(dt);
+    if (tokensActive) {
+      const before = Math.floor(tokens);
+      tokens += tokensPerSecond() * dt / 1000;
+      if (Math.floor(tokens) !== before) {
+        updateHud();
+        if (citySidebar && citySidebar.style.display === 'block') renderSidebar();
+        if (selectedTile && buildPopup && buildPopup.style.display === 'block') {
+          // re-enable the Build button once the player can afford it
+          const btn = buildPopup.querySelector('.bp-build');
+          if (btn) btn.disabled = tokens < BUILD_COST;
+        }
+      }
+    }
     draw();
     requestAnimationFrame(tick);
   }
@@ -698,7 +1208,9 @@ function initTilemap() {
   // Called by the tutorial once the player picks an island type
   window.startIsland = function (type) {
     if (tiles) return;
-    ({ tiles, rivers } = generateMap((Math.random() * 2 ** 31) | 0, type));
+    currentType = type;
+    window.__islandType = type;
+    ({ tiles, rivers, lakes } = generateMap((Math.random() * 2 ** 31) | 0, type));
     mode = 'revealing';
     revealStart = performance.now();
     revealedCols = 0;
@@ -729,6 +1241,45 @@ function initTilemap() {
     window.dispatchEvent(new Event('tilemap-zoom'));
     requestDraw();
   }, { passive: false });
+
+  // While placing the capital, the ghost village snaps to the hovered tile
+  canvas.addEventListener('mousemove', (e) => {
+    if (mode !== 'placing' || !tiles) return;
+    hoverTile = screenToTile(e.offsetX, e.offsetY);
+    canvas.style.cursor = validSet && validSet.has(hoverTile) ? 'pointer' : 'not-allowed';
+    requestDraw();
+  });
+
+  // Left-click: place the capital while placing; once placed, click tiles
+  // to open build popups or the city sidebar
+  canvas.addEventListener('click', (e) => {
+    if (e.button !== 0) return;
+    if (mode === 'placing') {
+      const t = screenToTile(e.offsetX, e.offsetY);
+      if (t && validSet && validSet.has(t)) {
+        canvas.style.cursor = '';
+        placeCity(t);
+      }
+      return;
+    }
+    if (mode === 'done') {
+      const t = screenToTile(e.offsetX, e.offsetY);
+      if (!t) { dismissPanels(); return; }
+      if (t === cityTile) {
+        // Show the city sidebar
+        if (buildPopup) buildPopup.style.display = 'none';
+        selectedTile = null;
+        renderSidebar();
+        if (citySidebar) citySidebar.style.display = 'block';
+      } else if (t.type !== OCEAN && cityTerritory && cityTerritory.has(t)) {
+        // Buildings can only go inside the city borders
+        showBuildPopup(t);
+      } else {
+        dismissPanels(); // ocean, or outside the city borders -> dismiss
+      }
+      requestDraw();
+    }
+  });
 
   // Pan with middle-click drag
   let panning = false;
