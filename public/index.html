@@ -36,6 +36,7 @@
   <div id="tilemap-screen" class="view">
     <canvas id="tilemap-canvas"></canvas>
     <button id="menu-btn">&#9776; Menu</button>
+    <button id="back-btn">&#8592; Back</button>
     <div id="known-players-hud">
       <span id="hud-title">Known Players</span>
       <div class="hud-player">
@@ -160,7 +161,7 @@ h1 {
 
 .saved-game .sg-delete:hover { background: #c62828; }
 
-#menu-btn {
+#menu-btn, #back-btn {
   position: fixed;
   top: 16px;
   left: 16px;
@@ -362,7 +363,8 @@ input[type="text"] {
 
 #build-popup .bp-title { font-size: 0.6rem; margin-bottom: 6px; }
 #build-popup .bp-yield { font-size: 0.45rem; color: #cfe; margin-bottom: 8px; }
-#build-popup .bp-build {
+#build-popup .bp-note { font-size: 0.4rem; color: #ffb457; margin-top: 4px; }
+#build-popup .bp-build, #build-popup .bp-cancel {
   font-family: 'Press Start 2P', cursive;
   font-size: 0.55rem;
   padding: 6px 12px;
@@ -371,6 +373,7 @@ input[type="text"] {
   border: 2px solid #000;
   cursor: pointer;
 }
+#build-popup .bp-cancel { background: #7a3030; margin-left: 6px; }
 #build-popup .bp-build:disabled { background: #666; cursor: not-allowed; }
 
 #city-sidebar {
@@ -396,6 +399,12 @@ input[type="text"] {
   font-size: 0.85rem;
   margin: 0 0 18px;
   color: #ffd400;
+  /* Shrink to the text so the gradient fill spans the whole name, not the
+     full-width box (otherwise only part of the gradient shows) */
+  align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  white-space: nowrap;
 }
 
 #city-sidebar .stat-row {
@@ -434,9 +443,29 @@ input[type="text"] {
   height: 40px;
 }
 
-.res-icon {
+/* A slot is the blacked-out icon with the colored one clipped over it, so a
+   fractional resource shows as a partly filled icon */
+.res-slot {
+  position: relative;
+  display: block;
   width: 40px;
   height: 40px;
+  flex-shrink: 0;
+}
+
+.res-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.res-icon {
+  display: block;
+  width: 40px;
+  height: 40px;
+  max-width: none;
   image-rendering: pixelated;
   filter: brightness(0);   /* blacked-out (empty) slot */
   opacity: 0.5;
@@ -447,11 +476,49 @@ input[type="text"] {
   opacity: 1;
 }
 
+.res-amount {
+  font-size: 0.45rem;
+  color: #ffd400;
+  margin-left: 4px;
+}
+
 .food-divider {
   align-self: stretch;
   width: 0;
   border-left: 2px dashed #ffd400;
   margin: 0 3px;
+}
+
+.growth-wrap {
+  margin-top: 16px;
+}
+
+.growth-label {
+  font-family: 'Press Start 2P', cursive;
+  font-size: 0.42rem;
+  line-height: 1.7;
+  color: #fff;
+  margin-bottom: 7px;
+}
+
+.growth-bar {
+  position: relative;
+  width: 100%;
+  height: 16px;
+  background: #2a2a2a;   /* replaced with the flag gradient in JS */
+  border: 2px solid #000;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.growth-mask {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  background: #2a2a2a;   /* hides the un-earned (right) portion */
+  transition: width 0.9s linear;
 }
 
 #hud-flag {

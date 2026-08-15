@@ -502,6 +502,278 @@ function generateMap(seed, islandType) {
   return { tiles, rivers, lakes };
 }
 
+// Terrain/water counts for a generated map, used both to derive the target
+// quartiles (offline) and to score candidate seeds during generation.
+function mapStats(result) {
+  const { tiles, rivers, lakes } = result;
+  const s = { land: 0, plains: 0, mountain: 0, hill: 0, forest: 0,
+              jungle: 0, desert: 0, oasis: 0, lakeTiles: 0, riverLen: 0 };
+  for (const t of tiles) {
+    if (t.type === OCEAN) continue;
+    s.land++;
+    if (t.type === PLAINS) s.plains++;
+    else if (t.type === MOUNTAIN) s.mountain++;
+    else if (t.type === HILL) s.hill++;
+    else if (t.type === FOREST) s.forest++;
+    else if (t.type === JUNGLE) s.jungle++;
+    else if (t.type === DESERT) s.desert++;
+    else if (t.type === OASIS) s.oasis++;
+  }
+  for (const l of lakes) s.lakeTiles += l.length;
+  for (const p of rivers) s.riverLen += Math.max(0, p.length - 1);
+  return s;
+}
+
+// Upper-quartile (75th percentile) target stats per island type, measured
+// over 600 seeds each by scripts/analyze-terrain.js. Generation picks the
+// seed whose stats best match these, so maps skew toward the richer end.
+const TERRAIN_TARGETS = {
+  lush:        { land: 157, plains: 69,  mountain: 12, hill: 12, forest: 31, jungle: 32, desert: 6,  oasis: 0, lakeTiles: 16, riverLen: 52 },
+  mountainous: { land: 207, plains: 105, mountain: 29, hill: 30, forest: 12, jungle: 13, desert: 25, oasis: 0, lakeTiles: 10, riverLen: 57 },
+  desert:      { land: 157, plains: 48,  mountain: 14, hill: 20, forest: 3,  jungle: 3,  desert: 72, oasis: 4, lakeTiles: 16, riverLen: 50 },
+  flooded:     { land: 143, plains: 74,  mountain: 8,  hill: 8,  forest: 19, jungle: 20, desert: 21, oasis: 0, lakeTiles: 10, riverLen: 94 }
+};
+
+// Geometric (log-ratio) distance: a 4->5 difference scores the same as
+// 20->25 (both a 1.25x ratio), so scarce terrain like mountains doesn't
+// dominate the fit the way an absolute difference would.
+function scoreCandidate(stats, target) {
+  let sum = 0, n = 0;
+  for (const k in target) {
+    const tv = target[k];
+    if (tv <= 0) continue;            // skip metrics with no target (e.g. oasis)
+    const av = Math.max(stats[k], 0.5); // floor avoids log(0) on empty counts
+    const d = Math.log(av / tv);
+    sum += d * d;
+    n++;
+  }
+  return n ? sum / n : 0;             // mean squared log-ratio; lower = better
+}
+
+const CANDIDATE_SEEDS = 20;
+
+// Generate CANDIDATE_SEEDS maps and keep the one that best fits the targets.
+function generateBestMap(type) {
+  const target = TERRAIN_TARGETS[type];
+  let best = null;
+  for (let i = 0; i < CANDIDATE_SEEDS; i++) {
+    const seed = (Math.random() * 2 ** 31) | 0;
+    const result = generateMap(seed, type);
+    const score = target ? scoreCandidate(mapStats(result), target) : 0;
+    if (!best || score < best.score) best = { seed, result, score };
+  }
+  return best; // { seed, result, score }
+}
+
+// ---- Tile minimap geometry ----
+// Each island tile opens into a radius-2 patch of 19 pointy-top hexes.
+// Axial neighbor offsets indexed by edge direction k, whose outward angle is
+// 60k degrees; edge k of a hex spans its corners k and k+1.
+const MINI_R = 2;
+const AX_DIRS = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
+const axDist = (q, r) => (Math.abs(q) + Math.abs(r) + Math.abs(q + r)) / 2;
+const axPx = (q, r) => ({ px: Math.sqrt(3) * (q + r / 2), py: 1.5 * r });
+
+const MINI_CELLS = [];
+for (let q = -MINI_R; q <= MINI_R; q++) {
+  for (let r = Math.max(-MINI_R, -q - MINI_R); r <= Math.min(MINI_R, -q + MINI_R); r++) {
+    MINI_CELLS.push({ q, r, ...axPx(q, r) });
+  }
+}
+
+// A cell corner / edge in the patch's local units (hex radius = 1)
+function axCorner(cell, j) {
+  const a = Math.PI / 180 * (60 * j - 30);
+  return { x: cell.px + Math.cos(a), y: cell.py + Math.sin(a) };
+}
+const cornerId = (p) => Math.round(p.x * 1000) + ':' + Math.round(p.y * 1000);
+
+// The patch has 30 boundary edges, exactly 5 in each of the 6 outward
+// directions. Slot (dir, idx) of one tile's patch is the same physical edge as
+// slot (dir+3, 4-idx) of the neighbouring tile's patch - the patches are
+// mirror images across the shared island-hex edge - so a road built on a
+// boundary edge belongs to both minimaps and can be continued from either.
+const EDGE_SLOT = new Map(); // "q,r,k" -> { dir, idx }
+const SLOT_EDGE = [];        // [dir][idx] -> { q, r, k }
+(function buildSlotTables() {
+  const inradius = Math.sqrt(3) / 2;
+  const bins = Array.from({ length: 6 }, () => []);
+  for (const cell of MINI_CELLS) {
+    for (let k = 0; k < 6; k++) {
+      const nq = cell.q + AX_DIRS[k][0], nr = cell.r + AX_DIRS[k][1];
+      if (axDist(nq, nr) <= MINI_R) continue; // interior edge
+      const a = Math.PI / 3 * k;
+      const mx = cell.px + inradius * Math.cos(a);
+      const my = cell.py + inradius * Math.sin(a);
+      let deg = Math.atan2(my, mx) * 180 / Math.PI;
+      if (deg < 0) deg += 360;
+      const dir = Math.round(deg / 60) % 6;
+      let off = deg - 60 * dir;
+      if (off > 180) off -= 360; else if (off < -180) off += 360;
+      bins[dir].push({ q: cell.q, r: cell.r, k, off });
+    }
+  }
+  bins.forEach((list, dir) => {
+    list.sort((a, b) => a.off - b.off); // index runs clockwise along the side
+    SLOT_EDGE[dir] = list.map(({ q, r, k }) => ({ q, r, k }));
+    list.forEach((e, idx) => EDGE_SLOT.set(`${e.q},${e.r},${e.k}`, { dir, idx }));
+  });
+})();
+
+// Distance from a point to a line segment (used for the generous edge hitbox)
+function segDist(x, y, p1, p2) {
+  const dx = p2.x - p1.x, dy = p2.y - p1.y;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 ? ((x - p1.x) * dx + (y - p1.y) * dy) / len2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(x - (p1.x + t * dx), y - (p1.y + t * dy));
+}
+
+// ---- Road topology across minimaps ----
+// These are pure functions of the island grid, so a road network can be
+// resolved without any of the rendering state.
+function tileIn(tiles, c, r) {
+  return (c < 0 || c >= MAP_COLS || r < 0 || r >= MAP_ROWS)
+    ? null : tiles[r * MAP_COLS + c];
+}
+
+// The tile in each of the 6 edge directions, matched to direction k by the
+// pixel angle to the neighbour (odd-r offsets alternate per row)
+function neighborsByDir(tiles, tile) {
+  const out = new Array(6).fill(null);
+  for (const [dc, dr] of neighborOffsets(tile.r)) {
+    const n = tileIn(tiles, tile.c + dc, tile.r + dr);
+    if (!n) continue;
+    let deg = Math.atan2(n.y - tile.y, n.x - tile.x) * 180 / Math.PI;
+    if (deg < 0) deg += 360;
+    out[Math.round(deg / 60) % 6] = n;
+  }
+  return out;
+}
+
+// Id of the edge on side k of patch cell (q,r) of `tile`. Interior edges are
+// named by the tile plus the cell pair they separate; boundary edges by the
+// pair of island tiles they join - written in a fixed order so that both
+// tiles' minimaps name that shared edge identically, which is what makes a
+// road built in one minimap show up in the next one.
+function edgeIdAt(tiles, tile, q, r, k) {
+  const nq = q + AX_DIRS[k][0], nr = r + AX_DIRS[k][1];
+  if (axDist(nq, nr) <= MINI_R) {
+    const a = `${q},${r}`, b = `${nq},${nr}`;
+    return `I|${tile.c},${tile.r}|` + (a < b ? `${a}~${b}` : `${b}~${a}`);
+  }
+  const slot = EDGE_SLOT.get(`${q},${r},${k}`);
+  const nb = neighborsByDir(tiles, tile)[slot.dir];
+  if (!nb) return `B|${tile.c},${tile.r}|${slot.dir}|${slot.idx}`; // off the map
+  const a = `${tile.c},${tile.r}`, b = `${nb.c},${nb.r}`;
+  return a < b ? `X|${a}|${b}|${slot.idx}` : `X|${b}|${a}|${MINI_R * 2 - slot.idx}`;
+}
+
+// Every (tile, cell, side) the edge appears as. Boundary edges have two: one
+// in each of the tiles they join, which is what lets a road cross over.
+function edgeFrames(tiles, edgeId) {
+  const parts = edgeId.split('|');
+  const out = [];
+  if (parts[0] === 'I') {
+    const [tc, tr] = parts[1].split(',').map(Number);
+    const [ca, cb] = parts[2].split('~');
+    const [q, r] = ca.split(',').map(Number);
+    const [nq, nr] = cb.split(',').map(Number);
+    const k = AX_DIRS.findIndex(([dq, dr]) => q + dq === nq && r + dr === nr);
+    out.push({ tile: tileIn(tiles, tc, tr), q, r, k });
+  } else if (parts[0] === 'B') {
+    const [tc, tr] = parts[1].split(',').map(Number);
+    const e = SLOT_EDGE[+parts[2]][+parts[3]];
+    out.push({ tile: tileIn(tiles, tc, tr), q: e.q, r: e.r, k: e.k });
+  } else { // X: shared by two tiles, mirrored slot in the second
+    const [c1, r1] = parts[1].split(',').map(Number);
+    const [c2, r2] = parts[2].split(',').map(Number);
+    const idx = +parts[3];
+    const t1 = tileIn(tiles, c1, r1), t2 = tileIn(tiles, c2, r2);
+    if (!t1 || !t2) return out;
+    const dir = neighborsByDir(tiles, t1).indexOf(t2);
+    if (dir < 0) return out;
+    const e1 = SLOT_EDGE[dir][idx];
+    const e2 = SLOT_EDGE[(dir + 3) % 6][MINI_R * 2 - idx];
+    out.push({ tile: t1, q: e1.q, r: e1.r, k: e1.k });
+    out.push({ tile: t2, q: e2.q, r: e2.r, k: e2.k });
+  }
+  return out;
+}
+
+// A road's endpoints, as ids in each patch it belongs to. Two roads sharing
+// one of these corners are joined, which is how road paths are formed - and
+// because a boundary road contributes corners in both of its tiles, a path
+// can run out of one minimap and on through the next.
+function roadCorners(tiles, edgeId) {
+  const nodes = [];
+  for (const f of edgeFrames(tiles, edgeId)) {
+    if (!f.tile) continue;
+    const cell = axPx(f.q, f.r);
+    for (const j of [f.k, (f.k + 1) % 6]) {
+      nodes.push(`${f.tile.c},${f.tile.r}#${cornerId(axCorner(cell, j))}`);
+    }
+  }
+  return nodes;
+}
+
+// The 6 corners of a patch hex, as ids in that tile's frame
+function cellCorners(tile, q, r) {
+  const cell = axPx(q, r);
+  const out = [];
+  for (let j = 0; j < 6; j++) {
+    out.push(`${tile.c},${tile.r}#${cornerId(axCorner(cell, j))}`);
+  }
+  return out;
+}
+
+// Roads reachable from the capital hex: seeded by the roads touching the
+// capital's own minimap hex, then spread road-to-road through shared corners.
+// Returns both the road ids and every corner those roads occupy - a hex is
+// served through those corners, so a road reaches the hexes along its sides
+// and the ones its ends merely poke into.
+function connectedRoads(tiles, roads, cityTile) {
+  const ids = new Set();
+  const corners = new Set();
+  if (!cityTile || !roads.size) return { ids, corners };
+  const cornerIndex = new Map(); // corner id -> road ids meeting there
+  const cornersOf = new Map();
+  for (const id of roads.keys()) {
+    const cs = roadCorners(tiles, id);
+    cornersOf.set(id, cs);
+    for (const c of cs) {
+      if (!cornerIndex.has(c)) cornerIndex.set(c, []);
+      cornerIndex.get(c).push(id);
+    }
+  }
+  const queue = [];
+  for (let k = 0; k < 6; k++) {
+    const id = edgeIdAt(tiles, cityTile, 0, 0, k);
+    if (roads.has(id) && !ids.has(id)) { ids.add(id); queue.push(id); }
+  }
+  while (queue.length) {
+    const id = queue.pop();
+    for (const c of cornersOf.get(id) || []) {
+      corners.add(c);
+      for (const other of cornerIndex.get(c) || []) {
+        if (!ids.has(other)) { ids.add(other); queue.push(other); }
+      }
+    }
+  }
+  return { ids, corners };
+}
+
+// A building only feeds the capital if its hex touches the capital hex, or a
+// road that leads back to it. A road counts whether the hex runs along its
+// side or just meets one of its ends, so both hexes a road ends between are
+// served - which is also what makes a stub poking in from the next minimap
+// enough on its own.
+function cellIsServed(tiles, cityTile, connected, tile, q, r) {
+  if (cityTile && tile === cityTile && axDist(q, r) === 1) return true;
+  if (!connected.corners.size) return false;
+  return cellCorners(tile, q, r).some(c => connected.corners.has(c));
+}
+
 const REVEAL_MS_PER_COL = 250; // island appears one column every 0.25s
 
 function initTilemap() {
@@ -530,13 +802,25 @@ function initTilemap() {
   let coastSet = null;      // subset next to open sea (yellow, 1 food)
   let hoverTile = null;     // tile under the cursor while placing
   let flagColors = ['rgb(255,153,0)'];
-  let selectedTile = null;  // tile whose build popup is open
   let currentSeed = null;   // seed the current map was generated from
+  let minimap = null;       // active 19-hex tile detail view (null on island)
+  let sidebarName = null;   // name override for the detail sidebar ("City")
+  let miniSel = null;       // minimap cell/edge whose popup is open
+
+  // Roads live in one global map so they can span minimaps: a road on a patch
+  // boundary edge has a single id shared by both neighbouring tiles.
+  const roads = new Map();  // edge id -> 'road' | 'water'
+  // Cells whose building currently reaches the capital (for the dimmed sprite)
+  let servedSet = new Set();
+
+  const SIDEBAR_FILL = 'rgb(15, 20, 30)'; // matches #city-sidebar background
+  const MINIMAP_WATER = '#2f86c9';
 
   // Economy: tokens are a global resource, cities hold per-city stats
   let tokens = 0;
   let tokensActive = false;
-  let capital = null;       // { name, level, wood, food, iron, gold, uranium }
+  let capital = null;       // { name, level, growth, wood, food, iron, gold, uranium }
+  let growthTimer = 0;      // ms accumulator so growth ticks once per second
 
   const CITY_NAMES = {
     lush: 'Brasilia',       // capital of Brazil
@@ -546,7 +830,14 @@ function initTilemap() {
     normal: 'Capital'
   };
 
-  const BUILD_COST = 10;
+  const BUILD_COST = 20;
+  const ROAD_COST = 5;
+  const WATER_ROAD_COST = 20;
+  // A minimap building is one 19th of a tile, so it yields a fifth of what the
+  // whole-tile building used to (resources are fractional from here on)
+  const MINI_YIELD = 0.2;
+  const round2 = (v) => Math.round(v * 100) / 100;
+
   // What each tile type can build, and the stat it yields to the city
   function buildOptionFor(t) {
     if (t.building) return null; // one building per tile
@@ -560,6 +851,63 @@ function initTilemap() {
     return null;
   }
   const tokensPerSecond = () => (capital ? capital.level : 0); // = total city levels
+
+  const GROWTH_PER_LEVEL = 200; // level N needs 200*N growth to reach N+1
+
+  // Growth added per second, from food vs city level:
+  //  level <= food - 1:    +food (full)
+  //  level == food:        +food/2 (50% slower)
+  //  level == food + 1:    0 (no growth)
+  //  level >= food + 2:    negative (starvation), worsening with the gap
+  // Food is fractional now (minimap buildings yield 0.2 each), so the four
+  // cases are interpolated into one continuous curve through those points.
+  function growthPerTurn() {
+    if (!capital) return 0;
+    const food = capital.food;
+    const diff = capital.level - food;
+    if (diff <= -1) return food;
+    if (diff <= 0) return food * (0.5 - 0.5 * diff);  // -1 -> food, 0 -> food/2
+    if (diff <= 1) return food * 0.5 * (1 - diff);    //  0 -> food/2, 1 -> 0
+    return -food * 0.5 * (diff - 1);
+  }
+
+  // Applied once per second. A level change resets the bar to empty and
+  // re-renders the sidebar/banner (moving the food upkeep divider).
+  function stepGrowth() {
+    if (!capital) return;
+    const before = capital.level;
+    capital.growth = (capital.growth || 0) + growthPerTurn();
+    const threshold = GROWTH_PER_LEVEL * capital.level;
+    if (capital.growth >= threshold) {
+      capital.level += 1;
+      capital.growth = 0;            // start of the new (higher) level
+    } else if (capital.growth < 0) {
+      if (capital.level > 1) capital.level -= 1;
+      capital.growth = 0;            // start of the new (lower) level
+    }
+    if (capital.level !== before) {
+      if (cityLevelEl) cityLevelEl.textContent = 'Lvl ' + capital.level;
+      updateHud();
+      if (citySidebar && citySidebar.style.display === 'flex') renderSidebar();
+      window.dispatchEvent(new Event('game-changed'));
+    }
+  }
+
+  function updateGrowthUI() {
+    if (!capital) return;
+    const txt = document.getElementById('sb-growth-text');
+    const fill = document.getElementById('sb-growth-fill');
+    const threshold = GROWTH_PER_LEVEL * capital.level;
+    const gpt = growthPerTurn();
+    const gptStr = (gpt >= 0 ? '+' : '') + (Number.isInteger(gpt) ? gpt : gpt.toFixed(1));
+    if (txt) {
+      txt.textContent = `Growth until next level: ${Math.floor(capital.growth || 0)}/${threshold} (${gptStr})`;
+    }
+    if (fill) {
+      const pct = Math.max(0, Math.min(100, (capital.growth || 0) / threshold * 100));
+      fill.style.width = (100 - pct) + '%'; // mask hides the un-earned part
+    }
+  }
 
   const OCEAN_BLANK = 'hsl(207, 65%, 26%)';
   const placeholder = [];
@@ -622,7 +970,8 @@ function initTilemap() {
     oasissawmill: 'oasis_sawmill_buliding.png',
     mountainmine: 'mountain_mine_building.png',
     hillmine: 'hill_mine_building.png',
-    uraniumhillmine: 'uraniumhill_mine_building.png'
+    uraniumhillmine: 'uraniumhill_mine_building.png',
+    beigehouse: 'beigehouse.png'
   });
   function terrainImageFor(t) {
     if (t.type === MOUNTAIN) return terrainImgs.mountain;
@@ -690,7 +1039,7 @@ function initTilemap() {
   const citySidebar = document.getElementById('city-sidebar');
   function bannerGradient(cols, dir = '90deg') {
     if (cols.length >= 3) return `linear-gradient(${dir}, ${cols[0]}, ${cols[1]}, ${cols[2]})`;
-    if (cols.length === 2) return `linear-gradient(${dir}, ${cols[0]} 0 50%, ${cols[1]} 50% 100%)`;
+    if (cols.length === 2) return `linear-gradient(${dir}, ${cols[0]}, ${cols[1]})`;
     return cols[0];
   }
   // Double-click the banner to rename the capital (edits the name line only)
@@ -743,12 +1092,11 @@ function initTilemap() {
       citySidebar.style.borderImage = 'none';
       citySidebar.style.borderColor = g;
     }
-    // City name uses the same flag gradient as text fill
-    const nameGrad = bannerGradient(flagColors, '90deg');
-    const nameStyle = `background:${nameGrad};-webkit-background-clip:text;` +
-      `background-clip:text;-webkit-text-fill-color:transparent;color:transparent;`;
+    // City name is plain white ("City" when opened from the tile minimap)
+    const nameStyle = `color:#fff;-webkit-text-fill-color:#fff;`;
+    const displayName = sidebarName || capital.name;
     let html =
-      `<h3 style="${nameStyle}">${capital.name}</h3>` +
+      `<h3 style="${nameStyle}">${displayName}</h3>` +
       `<div class="stat-row">Level <b>${capital.level}</b></div>` +
       `<div class="stat-row">Tokens <b id="sb-tokens">${Math.floor(tokens)}</b>` +
       ` (+${tokensPerSecond()}/s)</div>` +
@@ -757,59 +1105,170 @@ function initTilemap() {
       const amount = capital[res.stat] || 0;
       // Each resource's 10 slots span two rows of five, under a label
       html += `<div class="res-block">`;
-      html += `<div class="res-label">${res.label}</div>`;
+      html += `<div class="res-label">${res.label} <span class="res-amount">${round2(amount)}</span></div>`;
       for (let line = 0; line < 2; line++) {
         html += `<div class="res-line">`;
         for (let j = 0; j < 5; j++) {
           const i = line * 5 + j;
           // Food shows a dashed line after `level` slots (city's food upkeep)
           if (res.stat === 'food' && i === capital.level) html += `<span class="food-divider"></span>`;
-          const lit = i < amount ? ' lit' : '';
-          html += `<img class="res-icon${lit}" src="/images/icons/${res.icon}" alt="" draggable="false" />`;
+          // Amounts are fractional, so the slot the total lands in is filled
+          // part-way: the colored icon is clipped to that fraction of its width
+          // over the blacked-out one.
+          const frac = Math.max(0, Math.min(1, amount - i));
+          const src = `/images/icons/${res.icon}`;
+          html += `<span class="res-slot">` +
+            `<img class="res-icon" src="${src}" alt="" draggable="false" />` +
+            (frac > 0
+              ? `<span class="res-fill" style="width:${(frac * 100).toFixed(1)}%">` +
+                `<img class="res-icon lit" src="${src}" alt="" draggable="false" /></span>`
+              : '') +
+            `</span>`;
         }
         html += `</div>`;
       }
       html += `</div>`;
     }
     html += `</div>`;
+    // Growth toward the next level (progress bar at the very bottom). The
+    // bar shows the flag gradient; the mask hides the un-earned right part.
+    const barGrad = bannerGradient(flagColors, '90deg');
+    html += `<div class="growth-wrap">` +
+      `<div class="growth-label" id="sb-growth-text"></div>` +
+      `<div class="growth-bar" style="background:${barGrad}">` +
+      `<div class="growth-mask" id="sb-growth-fill"></div></div>` +
+      `</div>`;
     citySidebar.innerHTML = html;
+    updateGrowthUI();
   }
 
-  function showBuildPopup(t) {
-    selectedTile = t;
+  // ---- Roads and minimap buildings ----
+  // Buildings are stored on the island tile that owns the patch, keyed "q,r".
+  const miniBuildings = (t) => (t.miniBuildings || (t.miniBuildings = {}));
+
+  // The city's resources are the sum of every connected minimap building, so
+  // they are recomputed whenever a building or road changes the network.
+  function recomputeResources() {
+    if (!capital) return;
+    const connected = connectedRoads(tiles, roads, cityTile);
+    const stats = { wood: 0, food: 0, iron: 0, gold: 0, uranium: 0 };
+    servedSet = new Set();
+    for (const t of tiles) {
+      const built = t.miniBuildings;
+      if (!built) continue;
+      const opt = buildOptionFor({ type: t.type, silver: t.silver });
+      if (!opt) continue;
+      for (const key in built) {
+        const [q, r] = key.split(',').map(Number);
+        if (!cellIsServed(tiles, cityTile, connected, t, q, r)) continue;
+        servedSet.add(`${t.c},${t.r}#${key}`);
+        stats[opt.stat] += opt.amount * MINI_YIELD;
+      }
+    }
+    capital.food = round2((capital.baseFood || 1) + stats.food);
+    capital.wood = round2(stats.wood);
+    capital.iron = round2(stats.iron);
+    capital.gold = round2(stats.gold);
+    capital.uranium = round2(stats.uranium);
+  }
+
+  // ---- Build / road popups (minimap only) ----
+  function popupFooter(cost) {
+    return `<button class="bp-build"${tokens >= cost ? '' : ' disabled'}>OK</button>` +
+           `<button class="bp-cancel">Cancel</button>`;
+  }
+
+  function showMiniBuildPopup(cell) {
+    if (!buildPopup || !minimap) return;
     if (citySidebar) citySidebar.style.display = 'none';
-    if (!buildPopup) return;
-    const opt = buildOptionFor(t);
-    if (!opt) {
-      const why = t.building ? `Already has a ${t.building}.` : 'Nothing can be built here.';
-      buildPopup.innerHTML = `<div class="bp-title">${why}</div>`;
+    const src = minimap.sourceTile;
+    const opt = cell.building ? null : buildOptionFor({ type: src.type, silver: src.silver });
+    miniSel = { kind: 'cell', q: cell.q, r: cell.r, ux: cell.px, uy: cell.py, cost: null };
+    if (cell.city) {
+      buildPopup.innerHTML = `<div class="bp-title">Your capital city.</div>`;
+    } else if (cell.water) {
+      buildPopup.innerHTML = `<div class="bp-title">Nothing can be built on water.</div>`;
+    } else if (cell.building) {
+      buildPopup.innerHTML = `<div class="bp-title">Already has a ${cell.building}.</div>` +
+        `<div class="bp-note">${servedSet.has(`${src.c},${src.r}#${cell.q},${cell.r}`)
+          ? 'Linked to your capital.' : 'Not linked - build a road to it.'}</div>`;
+    } else if (!opt) {
+      buildPopup.innerHTML = `<div class="bp-title">Nothing can be built here.</div>`;
     } else {
-      const afford = tokens >= BUILD_COST;
+      miniSel.cost = BUILD_COST;
       buildPopup.innerHTML =
-        `<div class="bp-title">${opt.label}</div>` +
-        `<div class="bp-yield">+${opt.amount} ${opt.stat} · ${BUILD_COST} tokens</div>` +
-        `<button class="bp-build"${afford ? '' : ' disabled'}>Build</button>`;
-      const btn = buildPopup.querySelector('.bp-build');
-      if (btn) btn.addEventListener('click', () => build(t, opt));
+        `<div class="bp-title">Build a ${opt.label}?</div>` +
+        `<div class="bp-yield">+${round2(opt.amount * MINI_YIELD)} ${opt.stat} · ${BUILD_COST} tokens</div>` +
+        popupFooter(BUILD_COST);
+      wirePopup(() => buildOnCell(cell, opt));
     }
     buildPopup.style.display = 'block';
+    requestDraw();
   }
 
-  function build(t, opt) {
-    if (tokens < BUILD_COST || t.building) return;
+  function showRoadPopup(hit) {
+    if (!buildPopup || !minimap) return;
+    if (citySidebar) citySidebar.style.display = 'none';
+    // A road needs dry ground on at least one side; an all-water edge takes the
+    // pricier water road instead.
+    const water = hit.allWater;
+    const cost = water ? WATER_ROAD_COST : ROAD_COST;
+    const label = water ? 'water road' : 'road';
+    miniSel = { kind: 'edge', id: hit.id, ux: hit.ux, uy: hit.uy, cost: null };
+    const existing = roads.get(hit.id);
+    if (existing) {
+      buildPopup.innerHTML =
+        `<div class="bp-title">Already has a ${existing === 'water' ? 'water road' : 'road'}.</div>`;
+    } else {
+      miniSel.cost = cost;
+      buildPopup.innerHTML =
+        `<div class="bp-title">Place a ${label}?</div>` +
+        `<div class="bp-yield">${cost} tokens</div>` +
+        popupFooter(cost);
+      wirePopup(() => buildRoad(hit.id, water ? 'water' : 'road', cost));
+    }
+    buildPopup.style.display = 'block';
+    requestDraw();
+  }
+
+  function wirePopup(onOk) {
+    const ok = buildPopup.querySelector('.bp-build');
+    if (ok) ok.addEventListener('click', onOk);
+    const cancel = buildPopup.querySelector('.bp-cancel');
+    if (cancel) cancel.addEventListener('click', dismissPanels);
+  }
+
+  function buildOnCell(cell, opt) {
+    if (tokens < BUILD_COST || cell.building || cell.water || cell.city) return;
     tokens -= BUILD_COST;
-    t.building = opt.key;
-    capital[opt.stat] += opt.amount;
+    cell.building = opt.key;
+    miniBuildings(minimap.sourceTile)[`${cell.q},${cell.r}`] = opt.key;
+    recomputeResources();
+    afterBuild(() => showMiniBuildPopup(cell));
+  }
+
+  function buildRoad(edgeId, kind, cost) {
+    if (tokens < cost || roads.has(edgeId)) return;
+    tokens -= cost;
+    roads.set(edgeId, kind);
+    recomputeResources();
+    afterBuild(() => { if (miniSel) showRoadPopup({ id: edgeId, ux: miniSel.ux, uy: miniSel.uy, allWater: kind === 'water' }); });
+  }
+
+  function afterBuild(refresh) {
     updateHud();
-    showBuildPopup(t); // refresh (now shows "already built")
+    if (citySidebar && citySidebar.style.display === 'flex') renderSidebar();
+    refresh();
     requestDraw();
     window.dispatchEvent(new Event('game-changed'));
   }
 
   function dismissPanels() {
-    selectedTile = null;
+    sidebarName = null;
+    miniSel = null;
     if (buildPopup) buildPopup.style.display = 'none';
     if (citySidebar) citySidebar.style.display = 'none';
+    requestDraw();
   }
 
   const mapW = HEX_W * (MAP_COLS + 0.5);
@@ -834,6 +1293,7 @@ function initTilemap() {
   }
 
   function draw() {
+    if (minimap) { drawMinimap(); return; }
     ctx.fillStyle = '#0d3a5c'; // deep ocean backdrop
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -861,36 +1321,11 @@ function initTilemap() {
       ctx.lineWidth = Math.max(0.4, size * 0.06);
       ctx.strokeStyle = 'rgba(0, 20, 40, 0.25)';
       ctx.stroke();
-      if (!revealed || size <= 4) continue;
-
-      // Hills (and their mines) sit slightly lower on the tile, like farms
-      const lower = t.type === HILL ? size * 0.3 : 0;
-      // Sawmills and mines replace the terrain image; farms sit on top of it
-      const replacing = t.building === 'sawmill' || t.building === 'mine';
-      if (replacing) {
-        drawTileSprite(buildingImageFor(t), sx, sy + lower, size);
-      } else {
-        const timg = terrainImageFor(t);
-        if (timg) drawTileSprite(timg, sx, sy + lower, size);
-        // Farm sits slightly lower on the tile than terrain sprites
-        if (t.building === 'farm') drawTileSprite(buildingImgs.farm, sx, sy + size * 0.3, size);
-      }
-
-      if (t.shipwreck) drawTileSprite(terrainImgs.shipwreck, sx, sy, size);
-
-      // Highlight the tile whose build popup is open
-      if (t === selectedTile) {
-        hexPath(sx, sy, size);
-        ctx.lineWidth = Math.max(1.2, size * 0.12);
-        ctx.strokeStyle = '#ffe066';
-        ctx.stroke();
-        ctx.lineWidth = Math.max(0.4, size * 0.06);
-        ctx.strokeStyle = 'rgba(0, 20, 40, 0.25)';
-      }
     }
 
     // Rivers run along hex edges; during the reveal they are clipped to
-    // the columns that have already appeared
+    // the columns that have already appeared. Drawn before sprites so the
+    // sprites sit in front of the water.
     if (mode !== 'tutorial' && rivers.length) {
       ctx.save();
       if (mode === 'revealing') {
@@ -915,6 +1350,33 @@ function initTilemap() {
       ctx.restore();
     }
 
+    // Sprite pass: terrain/building/shipwreck images, in row order so they
+    // overlap correctly and sit in front of the rivers and terrain colors.
+    if (size > 4) {
+      for (const t of list) {
+        const sx = t.x * cam.zoom + cam.x;
+        const sy = t.y * cam.zoom + cam.y;
+        if (sx < -margin || sx > canvas.width + margin ||
+            sy < -margin || sy > canvas.height + margin) continue;
+        const revealed = mode === 'done' || mode === 'placing' ||
+          (mode === 'revealing' && t.c < revealedCols);
+        if (!revealed) continue;
+
+        // Hills (and their mines) sit slightly lower on the tile, like farms
+        const lower = t.type === HILL ? size * 0.3 : 0;
+        // Sawmills and mines replace the terrain image; farms sit on top of it
+        const replacing = t.building === 'sawmill' || t.building === 'mine';
+        if (replacing) {
+          drawTileSprite(buildingImageFor(t), sx, sy + lower, size);
+        } else {
+          const timg = terrainImageFor(t);
+          if (timg) drawTileSprite(timg, sx, sy + lower, size);
+          if (t.building === 'farm') drawTileSprite(buildingImgs.farm, sx, sy + size * 0.3, size);
+        }
+        if (t.shipwreck) drawTileSprite(terrainImgs.shipwreck, sx, sy, size);
+      }
+    }
+
     const size2 = HEX_SIZE * cam.zoom;
 
     // Placed capital: dashed territory border, village huts, flag banner
@@ -935,8 +1397,9 @@ function initTilemap() {
       }
       const csx = cityTile.x * cam.zoom + cam.x;
       const csy = cityTile.y * cam.zoom + cam.y;
-      drawVillage(csx, csy, size2, '#d0a066', '#7a4a1e');
+      drawTileSprite(buildingImgs.beigehouse, csx, csy, size2);
       drawCityFlag(csx, csy, size2);
+      if (banner && capital) banner.style.display = 'block';
       positionBanner(csx, csy, size2);
     }
 
@@ -973,12 +1436,6 @@ function initTilemap() {
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(img, px - w / 2, py - h * 0.8, w, h);
       }
-    }
-
-    // Keep the build popup pinned above its tile as the camera moves
-    if (selectedTile && buildPopup && buildPopup.style.display === 'block') {
-      buildPopup.style.left = (selectedTile.x * cam.zoom + cam.x) + 'px';
-      buildPopup.style.top = (selectedTile.y * cam.zoom + cam.y - size2 - 10) + 'px';
     }
   }
 
@@ -1035,7 +1492,8 @@ function initTilemap() {
     coastSet = new Set();
     validSet = new Set();
     for (const t of tiles) {
-      if (t.type === OCEAN) continue;
+      // Cities can't be founded on water, mountains, or hills (incl. uranium)
+      if (t.type === OCEAN || t.type === MOUNTAIN || t.type === HILL) continue;
       if (bordersLake(t) || bordersRiver(t)) { freshSet.add(t); validSet.add(t); }
       else if (bordersCoast(t)) { coastSet.add(t); validSet.add(t); }
     }
@@ -1143,7 +1601,9 @@ function initTilemap() {
     const name = CITY_NAMES[currentType] || 'Capital';
     // Freshwater capitals start with 2 food, coastal ones with only 1
     const startFood = freshSet && freshSet.has(tile) ? 2 : 1;
-    capital = { name, level: 1, wood: 0, food: startFood, iron: 0, gold: 0, uranium: 0 };
+    capital = { name, level: 1, growth: 0, wood: 0, food: startFood,
+                baseFood: startFood, iron: 0, gold: 0, uranium: 0 };
+    growthTimer = 0;
     tokens = 25;            // starting tokens once the capital is placed
     tokensActive = true;
     if (banner) {
@@ -1162,6 +1622,232 @@ function initTilemap() {
     if (!land.length) return;
     const start = land[Math.floor(Math.random() * land.length)];
     walker = { cur: start, next: null, t: 0, x: start.x, y: start.y, facing: 'front', pause: 800 };
+  }
+
+  // ---- Tile detail minimap (a 19-hex patch of the clicked tile's terrain) ----
+  const menuBtn = document.getElementById('menu-btn');
+  const backBtn = document.getElementById('back-btn');
+  const minimapHexSize = () => Math.min(canvas.width, canvas.height) / 13;
+
+  // Outward pixel-space angles (radians) of the tile's edges that carry a river
+  function riverEdgeDirsOfTile(tile) {
+    const keys = new Set();
+    for (const path of rivers) {
+      for (let i = 0; i + 1 < path.length; i++) {
+        const a = cornerKeyAt(path[i].x, path[i].y);
+        const b = cornerKeyAt(path[i + 1].x, path[i + 1].y);
+        keys.add(a < b ? a + '|' + b : b + '|' + a);
+      }
+    }
+    const cs = tileCornerPoints(tile).map(p => cornerKeyAt(p.x, p.y));
+    const dirs = [];
+    for (let k = 0; k < 6; k++) {
+      const a = cs[k], b = cs[(k + 1) % 6];
+      const ek = a < b ? a + '|' + b : b + '|' + a;
+      if (keys.has(ek)) dirs.push(Math.PI / 180 * (60 * k)); // edge k faces 60k deg
+    }
+    return dirs;
+  }
+
+  function openMinimap(sourceTile) {
+    const isOcean = sourceTile.type === OCEAN;
+    const built = sourceTile.miniBuildings || {};
+    const cells = MINI_CELLS.map(c => ({
+      q: c.q, r: c.r, px: c.px, py: c.py,
+      water: isOcean, city: false, building: built[`${c.q},${c.r}`] || null
+    }));
+    // River-side cells become water, but only the outer ring (distance 2) so
+    // the water is just 1 tile deep along the edge the river borders.
+    if (!isOcean) {
+      const dirs = riverEdgeDirsOfTile(sourceTile);
+      for (const cell of cells) {
+        if (axDist(cell.q, cell.r) !== MINI_R) continue; // outer ring only
+        const len = Math.hypot(cell.px, cell.py);
+        const ux = cell.px / len, uy = cell.py / len;
+        for (const a of dirs) {
+          if (ux * Math.cos(a) + uy * Math.sin(a) > 0.5) { cell.water = true; break; }
+        }
+      }
+    }
+    const isCity = sourceTile === cityTile;
+    if (isCity) {
+      const c0 = cells.find(c => c.q === 0 && c.r === 0);
+      if (c0) { c0.city = true; c0.water = false; c0.building = null; }
+    }
+    const byKey = new Map(cells.map(c => [`${c.q},${c.r}`, c]));
+
+    // Every distinct edge in the patch, resolved once: its id, its endpoints in
+    // local units, whether both its sides are water, and (for the patch rim)
+    // the outward angle used to draw the stub that pokes into the next tile.
+    const edges = [];
+    const seen = new Set();
+    for (const cell of cells) {
+      for (let k = 0; k < 6; k++) {
+        const id = edgeIdAt(tiles, sourceTile, cell.q, cell.r, k);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const nb = byKey.get(`${cell.q + AX_DIRS[k][0]},${cell.r + AX_DIRS[k][1]}`);
+        const p1 = axCorner(cell, k), p2 = axCorner(cell, (k + 1) % 6);
+        edges.push({
+          id, p1, p2,
+          ux: (p1.x + p2.x) / 2, uy: (p1.y + p2.y) / 2,
+          allWater: cell.water && (!nb || nb.water),
+          boundary: !nb, angle: Math.PI / 3 * k
+        });
+      }
+    }
+
+    minimap = {
+      sourceTile, isCity, cells, edges,
+      landColor: sourceTile.color,
+      terrainImg: terrainImageFor({ type: sourceTile.type, silver: sourceTile.silver })
+    };
+    dismissPanels();
+    if (menuBtn) menuBtn.style.display = 'none';
+    if (backBtn) backBtn.style.display = 'block';
+    requestDraw();
+  }
+
+  function closeMinimap() {
+    minimap = null;
+    dismissPanels();
+    if (backBtn) backBtn.style.display = 'none';
+    if (menuBtn) menuBtn.style.display = 'block';
+    requestDraw();
+  }
+
+  const ROAD_COLORS = { road: '#a8834e', water: '#63c6ea' };
+
+  function drawMinimap() {
+    ctx.fillStyle = SIDEBAR_FILL;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const mhs = minimapHexSize();
+    const cx = canvas.width / 2, cy = canvas.height / 2;
+    const src = minimap.sourceTile;
+    const toScreen = (p) => ({ x: cx + p.x * mhs, y: cy + p.y * mhs });
+
+    // Pass 1: hex fills + outlines
+    for (const cell of minimap.cells) {
+      const sx = cx + cell.px * mhs, sy = cy + cell.py * mhs;
+      hexPath(sx, sy, mhs);
+      ctx.fillStyle = cell.water ? MINIMAP_WATER : minimap.landColor;
+      ctx.fill();
+      ctx.lineWidth = Math.max(1, mhs * 0.05);
+      ctx.strokeStyle = 'rgba(0, 20, 40, 0.3)';
+      ctx.stroke();
+    }
+
+    // Pass 2: roads, laid along the hex edges under the sprites. A road on the
+    // patch rim is shared with the neighbouring tile's minimap, so it also gets
+    // a stub poking outward to show the path carries on into that tile.
+    ctx.lineCap = 'round';
+    for (const e of minimap.edges) {
+      const kind = roads.get(e.id);
+      if (!kind) continue;
+      const a = toScreen(e.p1), b = toScreen(e.p2);
+      ctx.lineWidth = Math.max(2, mhs * 0.2);
+      ctx.strokeStyle = ROAD_COLORS[kind] || ROAD_COLORS.road;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+      if (e.boundary) {
+        const mid = toScreen({ x: e.ux, y: e.uy });
+        ctx.lineWidth = Math.max(2, mhs * 0.16);
+        ctx.beginPath();
+        ctx.moveTo(mid.x, mid.y);
+        ctx.lineTo(mid.x + Math.cos(e.angle) * mhs * 0.3,
+                   mid.y + Math.sin(e.angle) * mhs * 0.3);
+        ctx.stroke();
+      }
+    }
+
+    // Pass 3: sprites, in front of all the fills
+    for (const cell of minimap.cells) {
+      const sx = cx + cell.px * mhs, sy = cy + cell.py * mhs;
+      if (cell.city) {
+        drawTileSprite(buildingImgs.beigehouse, sx, sy, mhs);
+        continue;
+      }
+      const lower = src.type === HILL ? mhs * 0.3 : 0;
+      if (cell.building) {
+        // A building that can't reach the capital is drawn faded
+        const linked = servedSet.has(`${src.c},${src.r}#${cell.q},${cell.r}`);
+        ctx.globalAlpha = linked ? 1 : 0.45;
+        if (cell.building === 'farm') {
+          if (minimap.terrainImg) drawTileSprite(minimap.terrainImg, sx, sy + lower, mhs);
+          drawTileSprite(buildingImgs.farm, sx, sy + mhs * 0.3, mhs);
+        } else {
+          drawTileSprite(buildingImageFor({ building: cell.building, type: src.type, silver: src.silver }),
+                         sx, sy + lower, mhs);
+        }
+        ctx.globalAlpha = 1;
+      } else if (!cell.water && minimap.terrainImg) {
+        drawTileSprite(minimap.terrainImg, sx, sy + lower, mhs);
+      }
+    }
+
+    // Pass 4: highlight whatever the open popup refers to
+    if (miniSel) {
+      ctx.strokeStyle = '#ffe066';
+      if (miniSel.kind === 'cell') {
+        const cell = minimap.cells.find(c => c.q === miniSel.q && c.r === miniSel.r);
+        if (cell) {
+          hexPath(cx + cell.px * mhs, cy + cell.py * mhs, mhs);
+          ctx.lineWidth = Math.max(1.5, mhs * 0.08);
+          ctx.stroke();
+        }
+      } else {
+        const e = minimap.edges.find(x => x.id === miniSel.id);
+        if (e) {
+          const a = toScreen(e.p1), b = toScreen(e.p2);
+          ctx.lineWidth = Math.max(2, mhs * 0.1);
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+      }
+    }
+
+    // The city banner follows the capital: it sits over the capital hex when
+    // that hex is on screen, and is hidden in every other tile's minimap.
+    if (banner && capital) {
+      const home = minimap.isCity && minimap.cells.find(c => c.q === 0 && c.r === 0);
+      if (home) {
+        banner.style.display = 'block';
+        positionBanner(cx + home.px * mhs, cy + home.py * mhs, mhs);
+      } else {
+        banner.style.display = 'none';
+      }
+    }
+
+    // Keep the open popup pinned to its cell or edge
+    if (miniSel && buildPopup && buildPopup.style.display === 'block') {
+      buildPopup.style.left = (cx + miniSel.ux * mhs) + 'px';
+      buildPopup.style.top = (cy + miniSel.uy * mhs - mhs * 0.6) + 'px';
+    }
+  }
+
+  // What is under a screen point in the minimap. Edges are tested first with a
+  // generous band around the whole segment, so corners and edges stay easy to
+  // hit; anything further in counts as a click on the hex itself.
+  const EDGE_HIT = 0.3; // in hex radii
+  function minimapHitAt(mx, my) {
+    const mhs = minimapHexSize();
+    const ux = (mx - canvas.width / 2) / mhs, uy = (my - canvas.height / 2) / mhs;
+    let edge = null, bestD = EDGE_HIT;
+    for (const e of minimap.edges) {
+      const d = segDist(ux, uy, e.p1, e.p2);
+      if (d < bestD) { bestD = d; edge = e; }
+    }
+    if (edge) return { kind: 'edge', edge };
+    let cell = null, best = 1.05 ** 2;
+    for (const c of minimap.cells) {
+      const d = (ux - c.px) ** 2 + (uy - c.py) ** 2;
+      if (d < best) { best = d; cell = c; }
+    }
+    return cell ? { kind: 'cell', cell } : null;
   }
 
   // BFS over land tiles: shortest tile path from one tile to another,
@@ -1252,12 +1938,19 @@ function initTilemap() {
           const el = document.getElementById('sb-tokens');
           if (el) el.textContent = Math.floor(tokens);
         }
-        if (selectedTile && buildPopup && buildPopup.style.display === 'block') {
-          // re-enable the Build button once the player can afford it
+        if (miniSel && miniSel.cost != null && buildPopup &&
+            buildPopup.style.display === 'block') {
+          // re-enable the OK button once the player can afford it
           const btn = buildPopup.querySelector('.bp-build');
-          if (btn) btn.disabled = tokens < BUILD_COST;
+          if (btn) btn.disabled = tokens < miniSel.cost;
         }
       }
+    }
+    // City growth accrues once per second
+    if (mode === 'done' && capital) {
+      growthTimer += dt;
+      while (growthTimer >= 1000) { growthTimer -= 1000; stepGrowth(); }
+      if (citySidebar && citySidebar.style.display === 'flex') updateGrowthUI();
     }
     draw();
     requestAnimationFrame(tick);
@@ -1268,8 +1961,11 @@ function initTilemap() {
     if (tiles) return;
     currentType = type;
     window.__islandType = type;
-    currentSeed = (Math.random() * 2 ** 31) | 0;
-    ({ tiles, rivers, lakes } = generateMap(currentSeed, type));
+    // Pick the best-fitting of several candidate seeds; keep its seed so a
+    // resumed game regenerates the identical map.
+    const best = generateBestMap(type);
+    currentSeed = best.seed;
+    ({ tiles, rivers, lakes } = best.result);
     mode = 'revealing';
     revealStart = performance.now();
     revealedCols = 0;
@@ -1282,17 +1978,28 @@ function initTilemap() {
     if (!capital || !cityTile) return null;
     const buildings = [];
     for (const t of tiles) if (t.building) buildings.push({ c: t.c, r: t.r, building: t.building });
+    // Minimap buildings are stored per island tile; roads are global, and
+    // their ids already name the tiles they belong to.
+    const mini = [];
+    for (const t of tiles) {
+      if (t.miniBuildings && Object.keys(t.miniBuildings).length) {
+        mini.push({ c: t.c, r: t.r, cells: t.miniBuildings });
+      }
+    }
     return {
       seed: currentSeed,
       islandType: currentType,
       capital: {
         c: cityTile.c, r: cityTile.r,
-        name: capital.name, level: capital.level,
+        name: capital.name, level: capital.level, growth: capital.growth || 0,
+        baseFood: capital.baseFood || 1,
         wood: capital.wood, food: capital.food, iron: capital.iron,
         gold: capital.gold, uranium: capital.uranium
       },
       tokens: Math.floor(tokens),
-      buildings
+      buildings,
+      mini,
+      roads: [...roads.entries()].map(([id, kind]) => ({ id, kind }))
     };
   };
 
@@ -1307,12 +2014,21 @@ function initTilemap() {
       const t = tileAt(b.c, b.r);
       if (t) t.building = b.building;
     }
+    for (const m of state.mini || []) {
+      const t = tileAt(m.c, m.r);
+      if (t) t.miniBuildings = { ...m.cells };
+    }
+    for (const rd of state.roads || []) roads.set(rd.id, rd.kind);
     const ct = tileAt(state.capital.c, state.capital.r);
     cityTile = ct;
     buildCityBorder(ct);
     const s = state.capital;
-    capital = { name: s.name, level: s.level, wood: s.wood, food: s.food,
-                iron: s.iron, gold: s.gold, uranium: s.uranium };
+    capital = { name: s.name, level: s.level, growth: s.growth || 0,
+                baseFood: s.baseFood != null ? s.baseFood : (s.food || 1),
+                wood: s.wood, food: s.food, iron: s.iron, gold: s.gold,
+                uranium: s.uranium };
+    recomputeResources(); // resources follow from the saved buildings + roads
+    growthTimer = 0;
     tokens = state.tokens || 0;
     tokensActive = true;
     mode = 'done';
@@ -1342,8 +2058,11 @@ function initTilemap() {
     requestDraw();
   }
 
+  if (backBtn) backBtn.addEventListener('click', closeMinimap);
+
   // Zoom with the scroll wheel, keeping the point under the cursor fixed
   canvas.addEventListener('wheel', (e) => {
+    if (minimap) return; // no pan/zoom inside the minimap
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
     const newZoom = Math.min(6, Math.max(0.2, cam.zoom * factor));
@@ -1362,10 +2081,27 @@ function initTilemap() {
     requestDraw();
   });
 
-  // Left-click: place the capital while placing; once placed, click tiles
-  // to open build popups or the city sidebar
+  // Left-click: place the capital while placing; on the island open a tile's
+  // minimap; inside the minimap click the city center for its sidebar
   canvas.addEventListener('click', (e) => {
     if (e.button !== 0) return;
+    if (minimap) {
+      const hit = minimapHitAt(e.offsetX, e.offsetY);
+      if (!hit) { dismissPanels(); return; }
+      if (hit.kind === 'edge') {
+        showRoadPopup({ id: hit.edge.id, ux: hit.edge.ux, uy: hit.edge.uy,
+                        allWater: hit.edge.allWater });
+      } else if (hit.cell.city) {
+        miniSel = null;
+        if (buildPopup) buildPopup.style.display = 'none';
+        sidebarName = 'City';
+        renderSidebar();
+        if (citySidebar) citySidebar.style.display = 'flex';
+      } else {
+        showMiniBuildPopup(hit.cell);
+      }
+      return;
+    }
     if (mode === 'placing') {
       const t = screenToTile(e.offsetX, e.offsetY);
       if (t && validSet && validSet.has(t)) {
@@ -1376,20 +2112,11 @@ function initTilemap() {
     }
     if (mode === 'done') {
       const t = screenToTile(e.offsetX, e.offsetY);
-      if (!t) { dismissPanels(); return; }
-      if (t === cityTile) {
-        // Show the city sidebar
-        if (buildPopup) buildPopup.style.display = 'none';
-        selectedTile = null;
-        renderSidebar();
-        if (citySidebar) citySidebar.style.display = 'flex';
-      } else if (t.type !== OCEAN && cityTerritory && cityTerritory.has(t)) {
-        // Buildings can only go inside the city borders
-        showBuildPopup(t);
-      } else {
-        dismissPanels(); // ocean, or outside the city borders -> dismiss
+      if (!t) return;
+      // The city tile and any tile inside the borders open the tile minimap
+      if (t === cityTile || (cityTerritory && cityTerritory.has(t))) {
+        openMinimap(t);
       }
-      requestDraw();
     }
   });
 
@@ -1397,6 +2124,7 @@ function initTilemap() {
   let panning = false;
   let lastMouse = null;
   canvas.addEventListener('mousedown', (e) => {
+    if (minimap) return;
     if (e.button === 1) {
       e.preventDefault(); // stop browser autoscroll
       panning = true;
@@ -1431,7 +2159,11 @@ if (typeof window !== 'undefined') {
 }
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    generateMap, MAP_COLS, MAP_ROWS, ISLAND_TYPES,
-    OCEAN, PLAINS, LAND, MOUNTAIN, JUNGLE, FOREST, DESERT, HILL, OASIS
+    generateMap, mapStats, MAP_COLS, MAP_ROWS, ISLAND_TYPES,
+    OCEAN, PLAINS, LAND, MOUNTAIN, JUNGLE, FOREST, DESERT, HILL, OASIS,
+    // minimap patch geometry + road topology
+    MINI_R, MINI_CELLS, AX_DIRS, EDGE_SLOT, SLOT_EDGE, axDist, axPx, axCorner,
+    cornerId, segDist, tileIn, neighborsByDir, edgeIdAt, edgeFrames,
+    roadCorners, cellCorners, connectedRoads, cellIsServed
   };
 }
